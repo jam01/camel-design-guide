@@ -22,6 +22,7 @@ public class CircuitBreakerRetryProbe extends ProbeSupport {
     private final AtomicInteger falling = new AtomicInteger();
     private final AtomicInteger opening = new AtomicInteger();
     private final AtomicInteger control = new AtomicInteger();
+    private final AtomicInteger protectedCalls = new AtomicInteger();
 
     @Override
     protected RouteBuilder createRouteBuilder() {
@@ -29,6 +30,18 @@ public class CircuitBreakerRetryProbe extends ProbeSupport {
             @Override
             public void configure() {
                 errorHandler(defaultErrorHandler().maximumRedeliveries(2).redeliveryDelay(0));
+
+                // A breaker in a CALLEE, retried by the caller rather than in its own route.
+                from("direct:calls-protected")
+                        .to("direct:protected");
+
+                from("direct:protected")
+                        .circuitBreaker()
+                            .process(ex -> {
+                                protectedCalls.incrementAndGet();
+                                throw new Boom();
+                            })
+                        .end();
 
                 // Control: the same failure with no breaker around it.
                 from("direct:control")
@@ -126,5 +139,18 @@ public class CircuitBreakerRetryProbe extends ProbeSupport {
                         + "error path, it is the fallback path arriving faster")
                 .hasSize(10)
                 .allMatch("FALLBACK"::equals);
+    }
+
+    @Test
+    void aCallersRetryDoesReEnterABreakerInACallee_soEachAttemptIsAnotherRecordedFailure() {
+        template.request("direct:calls-protected", ex -> ex.getIn().setBody("in"));
+
+        assertThat(protectedCalls.get())
+                .describedAs("the mirror image of the same-route case: redelivery cannot re-enter a "
+                        + "breaker block, but it can re-enter the ROUTE that contains one. Three "
+                        + "attempts at the call became three breaker calls, so a caller's retry "
+                        + "policy is silently multiplying the failure rate the breaker uses to "
+                        + "decide whether to open.")
+                .isEqualTo(3);
     }
 }
