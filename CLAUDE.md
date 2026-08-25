@@ -229,6 +229,11 @@ non-transacted route reached by `.choice()`.
 
 The mark works everywhere because it writes to the **exchange**, which survives all of these paths.
 
+**It was never about `handled(true)`.** Anything that clears the exception before the boundary
+looks has the same effect, and three constructs do — measured inside a transacted route, each
+commits the work written before the failure: `handled(true)`, a circuit breaker's `onFallback`, and
+`doCatch` (`CircuitBreakerProbe`). Two of those are reached for to make a route *more* robust.
+
 Also measured: the bug is only *observable* when the failure is non-resource — a SQL error has
 already poisoned the transaction. Of the application's three test cases, two fail via CHECK constraints
 and passed even unfixed.
@@ -242,6 +247,11 @@ and passed even unfixed.
   "does not transfer" caveats and cannot be settled in this sandbox.
 
 
+- **Known-and-left**, so nobody re-derives them: a bulkhead's permits against a caller's retry is
+  stated in the guide as an inference from the measured route-versus-block rule, not probed —
+  each retry re-enters the route and therefore takes another permit. And nothing measures a
+  breaker's effect on a transaction beyond `timeoutEnabled` and the `onFallback` commit above.
+  Both look like diminishing returns rather than gaps.
 - Retries on a transacted route share **one** transaction under Spring (`TransactedRetryProbe`:
   3 attempts, 1 commit decision). camel-jta's javadoc claims a fresh transaction per attempt —
   still unmeasured there.

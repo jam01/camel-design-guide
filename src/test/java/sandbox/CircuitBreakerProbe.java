@@ -83,6 +83,33 @@ public class CircuitBreakerProbe extends ProbeSupport {
                             throw new OtherBoom();
                         });
 
+                // A fallback clears the exception. Inside a transacted route, that is the same
+                // shape as handled(true) — the boundary is handed a clean exchange.
+                from("direct:tx-with-fallback")
+                        .transacted()
+                        .to(insertRow("before"))
+                        .circuitBreaker()
+                            .process(ex -> {
+                                throw new OtherBoom();
+                            })
+                        .onFallback()
+                            .setBody(constant("FALLBACK"))
+                        .end()
+                        .to(insertRow("after"));
+
+                // And doCatch clears it too — the same shape again, a third way in.
+                from("direct:tx-with-catch")
+                        .transacted()
+                        .to(insertRow("before"))
+                        .doTry()
+                            .process(ex -> {
+                                throw new OtherBoom();
+                            })
+                        .doCatch(OtherBoom.class)
+                            .setBody(constant("caught"))
+                        .end()
+                        .to(insertRow("after"));
+
                 from("direct:cb-bulkhead")
                         .circuitBreaker()
                             .resilience4jConfiguration()
@@ -172,5 +199,30 @@ public class CircuitBreakerProbe extends ProbeSupport {
 
         releasePermit.countDown();
         holder.join(5000);
+    }
+
+    @Test
+    void aFallbackInsideATransactedRouteCommitsThePartialWork() throws Exception {
+        var out = template.request("direct:tx-with-fallback", ex -> ex.getIn().setBody("in"));
+
+        assertThat(out.getMessage().getBody(String.class)).isEqualTo("FALLBACK");
+        assertThat(notes())
+                .describedAs("the breaker's fallback cleared the exception, so the route carried on "
+                        + "and the boundary was handed a clean exchange — the write made before the "
+                        + "failure COMMITTED. onFallback is handled(true) wearing a different name, "
+                        + "and it needs markRollbackOnly() for the same reason.")
+                .containsExactly("before", "after");
+    }
+
+    @Test
+    void andSoDoesADoCatch_becauseItIsTheSameClearingStep() throws Exception {
+        template.request("direct:tx-with-catch", ex -> ex.getIn().setBody("in"));
+
+        assertThat(notes())
+                .describedAs("a third construct with the same consequence: doCatch clears the "
+                        + "exception, so the boundary commits the work done before the failure. "
+                        + "The rule is not about handled(true) — it is about anything that clears "
+                        + "the exception before the boundary looks.")
+                .containsExactly("before", "after");
     }
 }
