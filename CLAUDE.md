@@ -221,6 +221,13 @@ Row 1 differs because the handlers are wired opposite ways. Spring's `Transactio
 `TransactionErrorHandler`, so the transaction completes first (`JtaFidelityProbe`:
 `["ROLLED_BACK","clause-ran"]`).
 
+**The founding incident was row 2, not row 1.** The application runs camel-jta, where row 1 rolls
+back — so the original bug could only ever have been the boundary-crossing case, and an independent reviewer
+confirmed exactly that. Note the consequence for the sandbox: `TransactionProbe`, the first probe
+written here, reproduces row 1 on **Spring**. It demonstrates the same symptom by a different
+route, and is not a reproduction of the incident. That is fine for illustrating the mechanism, but
+do not cite it as the application's bug.
+
 Row 2 is the same on both and has nothing to do with transactions: the callee's own error handler
 claims and clears the failure before control returns. **This is the row a refactor creates** —
 factoring a stage into its own untransacted route moves its failures into a different error
