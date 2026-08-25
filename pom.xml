@@ -1,0 +1,164 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>sandbox</groupId>
+    <artifactId>camel-sandbox</artifactId>
+    <version>0-SNAPSHOT</version>
+
+    <!--
+      A scratch project for settling Camel semantics by experiment.
+
+      Deliberately container-free: everything runs in a plain JUnit JVM against H2 in memory, so a
+      probe is a few seconds rather than a Testcontainers startup. Camel is pinned to the version
+      the real app is on so findings transfer.
+    -->
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <camel.version>4.18.0</camel.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.apache.camel</groupId>
+                <artifactId>camel-bom</artifactId>
+                <version>${camel.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-sql</artifactId>
+        </dependency>
+        <!-- Spring's DataSourceTransactionManager is the least-ceremony way to get a real
+             .transacted() boundary with no app server or JTA provider.
+             NOTE: the real app uses camel-jta/Narayana, which is a DIFFERENT TransactionErrorHandler.
+             Both are one-screen classes; diff them before trusting a transaction finding here.
+             See CLAUDE.md § Known fidelity gaps. -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-spring</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>2.3.232</version>
+        </dependency>
+
+        <!-- A real HTTP consumer, in-JVM: closes the "no HTTP consumer wired" fidelity gap so the
+             response-body and threading findings can be measured rather than read. Still no
+             container - Vert.x binds a port in this JVM. -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-platform-http-vertx</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-resilience4j</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- An in-JVM broker, so the in-only / redelivery / DLQ half of the guide can be measured
+             instead of reasoned. ActiveMQ 6 is Jakarta-based; camel-activemq pins the 5.19 jakarta
+             client, so pin both client and broker to 6.x and exclude the older one. -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-activemq</artifactId>
+            <scope>test</scope>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.apache.activemq</groupId>
+                    <artifactId>activemq-client-jakarta</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.activemq</groupId>
+            <artifactId>activemq-broker</artifactId>
+            <version>6.3.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.activemq</groupId>
+            <artifactId>activemq-client</artifactId>
+            <version>6.3.1</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-test-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- The application uses camel-jta with Narayana, and two findings here are known NOT to
+             transfer to it. Both hinge on camel-jta's own rollback condition, so an embedded
+             Narayana transaction manager settles them without a container or an XA datasource. -->
+        <dependency>
+            <groupId>org.apache.camel</groupId>
+            <artifactId>camel-jta</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.narayana.jta</groupId>
+            <artifactId>narayana-jta</artifactId>
+            <version>7.3.4.Final</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- Narayana marks this optional but will not initialise without it. -->
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>3.6.1.Final</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- A bounded connection pool, so "what happens when a transacted route runs out of
+             connections" can be measured. H2's own DataSource does not pool. -->
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>6.3.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.assertj</groupId>
+            <artifactId>assertj-core</artifactId>
+            <version>3.27.3</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-simple</artifactId>
+            <version>2.0.16</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.4</version>
+                <configuration>
+                    <!-- Probes are named *Probe, which surefire would otherwise skip. -->
+                    <includes>
+                        <include>**/*Probe.java</include>
+                        <include>**/*Test.java</include>
+                    </includes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
