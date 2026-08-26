@@ -136,6 +136,8 @@ re-derive these; do challenge them if something contradicts them.
 | **`shouldWrapInErrorHandler` is the unifying rule**: no error handler is installed inside `doTry`/`doCatch`/`doFinally`, inside `onException` clause bodies, inside `.circuitBreaker()`, or on `multicast()` children — parent chain included. This single method explains three findings measured separately here: redelivery cannot re-enter a breaker, a throwing compensation inside a clause is unhandled and replaces the original failure, and a throw inside `doCatch` reaches no clause. | `ProcessorDefinitionHelper.shouldWrapInErrorHandler`; `CircuitBreakerRetryProbe`, `ClauseProbe`, `CatchRethrowProbe` |
 | On a **transacted** route what survives is **being a clause**, not where it is declared. Measured under camel-jta with the same `maximumRedeliveries(2)` in four places: builder handler **1**, route handler **1**, builder clause **3**, route clause **3**. Both handler scopes are replaced by the transaction handler (own policy defaults to 0) and fail silently; both clause scopes are still consulted. A route-scoped clause must be declared before `.transacted()`. | `JtaTransactedRetryProbe` |
 | Under **camel-jta each retry is its own transaction** (3 attempts → 3 rollbacks); under Spring all attempts share one. Both halves now measured rather than one being a javadoc claim. | `JtaTransactedRetryProbe`, `TransactedRetryProbe` |
+| **Two sticky flags, not one.** Clearing `failureHandled` alone lets the clause run and set the body, but `errorHandlerHandled` is *also* sticky (left `false` by the first failure), so `prepareExchangeAfterFailure` sees it already set and restores the exception — the mapped body ships with a failed exchange. Clearing **both** (`setFailureHandled(false)` + `setErrorHandlerHandled(null)`) is a complete repair: clause fires, body set, exchange clean. This is why the single-line workaround in CAMEL-5139 only half-works. | `ClaimResetProbe` |
+| **An exchange copy does NOT carry the claim** — `createCopy` leaves the new exchange unclaimed while the original keeps it. So `wireTap`, `enrich`, split branches all start clean; the claim is confined to the exchange that earned it. | `ClaimResetProbe` |
 | **A claim costs exactly one capability, and nothing else.** On a claimed exchange: routing still reaches the end of the route, a later `doTry`/`doCatch` still catches, `setHeader`/`setBody` still land, and the exchange ends clean if nothing is left thrown. Only *being mapped by a clause* is lost, for the rest of the exchange's life — and via `direct:` that includes the caller's later steps. The failure mode is a 500 where you meant a 409, on a route where everything else works. | `CatchRethrowProbe` |
 | **`doCatch` clears the exception, not the claim.** Measured: inside the catch `exception=false, claimed=true`, and still `claimed=true` after `end()` while the route runs on. Routing resumes because the exception is gone — *claimed* is not one of gate 1's terms (`isFailed \|\| isRollbackOnly \|\| isRollbackOnlyLast \|\| errorHandlerHandled`). The claim is a permanent statement of ownership, which is why a *later* failure on the same exchange also finds every clause closed. | `CatchEscapeProbe` |
 | **Two independent facts govern a throw from inside a `doCatch`, and conflating them is easy.** The *wrapping* rule decides whether **this route's** clauses fire — never, inside a catch. The *claim* decides whether **anyone else's** do. So a rethrow after an inline failure escapes unclaimed and **the caller's clause maps it normally**; a rethrow after a *called route* failed does not, because that route claimed and every later handler treats the exchange as finished. Same code, opposite outcome, decided by whether the thing inside `doTry` was inline or a route. | `CatchEscapeProbe`, `CatchRethrowProbe` |
@@ -266,6 +268,20 @@ commits the work written before the failure: `handled(true)`, a circuit breaker'
 Also measured: the bug is only *observable* when the failure is non-resource — a SQL error has
 already poisoned the transaction. Of the application's three test cases, two fail via CHECK constraints
 and passed even unfixed.
+
+## Upstream tickets on the sticky-claim family
+
+Known and repeatedly reported; treated as by design in the general case.
+
+- **CAMEL-19441** (2023) — routing does not continue after `doTry..doCatch..end` when a `direct:`
+  callee used `handled(true)`. Resolved **Not A Bug**.
+- **CAMEL-5139** — `continued(Predicate)` does not fire the second time; the reporter identifies
+  `Exchange.FAILURE_HANDLED` persisting and names `removeProperty` as the workaround. Resolved
+  **Incomplete** (fix versions 2.9.2 / 2.10.0), referencing **CAMEL-4057** for the analogous
+  `continued(true)` case.
+- That CAMEL-4057 fix is still in the code: `prepareExchangeForContinue` calls
+  `setFailureHandled(false)`, which is why `continued(true)` is the one construct that clears a
+  claim. Individual instances were patched; the general behaviour was not.
 
 ## Open questions worth a probe
 
