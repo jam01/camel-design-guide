@@ -137,6 +137,7 @@ re-derive these; do challenge them if something contradicts them.
 | On a **transacted** route what survives is **being a clause**, not where it is declared. Measured under camel-jta with the same `maximumRedeliveries(2)` in four places: builder handler **1**, route handler **1**, builder clause **3**, route clause **3**. Both handler scopes are replaced by the transaction handler (own policy defaults to 0) and fail silently; both clause scopes are still consulted. A route-scoped clause must be declared before `.transacted()`. | `JtaTransactedRetryProbe` |
 | Under **camel-jta each retry is its own transaction** (3 attempts → 3 rollbacks); under Spring all attempts share one. Both halves now measured rather than one being a javadoc claim. | `JtaTransactedRetryProbe`, `TransactedRetryProbe` |
 | **Swallowing a failure to keep the exchange clean is a TRAP, not a technique.** A stage that catches its own failure internally does come back unclaimed — because nothing failed as far as the boundary is concerned, so a transacted stage doing this **commits** the work it meant to undo. Commit-on-failure in a different outfit. Kept as a probe because it is an attractive-looking wrong answer. | `ContainedFailureProbe` |
+| **There are TWO `prepareExchangeForContinue` methods in `RedeliveryErrorHandler` and they disagree.** `SimpleTask`'s removes `EXCEPTION_CAUGHT` and sets `errorHandlerHandled(true)` while never clearing the claim; `RedeliveryTask`'s clears the claim and leaves the verdict alone. Only the latter can apply to `continued(true)`: `simpleTask` is chosen only when `exceptionPolicies` is empty, and a continued clause is itself a policy. Cite the `RedeliveryTask` one. | `RedeliveryErrorHandler:754` vs `:1234`, selection at `:1983` |
 | **`ContinueExchangeProcessor`** is the sandbox's workaround: `prepareExchangeForContinue`'s reset plus `setErrorHandlerHandled(null)`, used inside a `doCatch`. Measured in the shape with no other answer — transacted stage throws and rolls back, caller catches, later failure maps normally on a clean exchange. Reaches into `ExchangeExtension`; intended to be replaced by an upstream lever on `doCatch`. | `ContinueExchangeProbe` |
 | **`continued(true)` can fire twice** on one exchange — it clears the claim every time. CAMEL-5139's complaint is fixed. This is why the clause system copes with repeated failures and `doCatch` does not: the reset was attached to clauses. | `ContainedFailureProbe` |
 | **The cleanse works and is repeatable.** Setting exception/rollbackOnly/rollbackOnlyLast/routeStop clear, plus `setFailureHandled(false)` and `setErrorHandlerHandled(null)` and `setRedeliveryExhausted(false)`, restores a claimed exchange completely: the next stage's clause fires, body sets, exchange leaves clean — and it works between every stage, not once. Caveats: `ExchangeExtension` is not application-facing API, and it destroys the record that an earlier stage failed. | `CleanseProbe` |
@@ -273,6 +274,16 @@ commits the work written before the failure: `handled(true)`, a circuit breaker'
 Also measured: the bug is only *observable* when the failure is non-resource — a SQL error has
 already poisoned the transaction. Of the application's three test cases, two fail via CHECK constraints
 and passed even unfixed.
+
+## Out of scope by decision, not oversight
+
+- **General exception propagation.** `ContinueExchangeProcessor` makes Mule-4-style propagation
+  (catch, translate, rethrow, catch higher) technically possible. **We will not build it and the
+  guide warns against it** — it produces error flow invisible to `onException`, behaviour depending
+  on internal flags no reviewer checks, and failure paths unreadable from the DSL. The reset is a
+  repair at one boundary you own, never a foundation.
+- The opinion that `doTry`/`doCatch` is *broken* stays out of the guide. The guide states the
+  limitation and its difficulties; it does not editorialise about the framework.
 
 ## Candidate upstream issue — NOT filed, may be pursued later
 
