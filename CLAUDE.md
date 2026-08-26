@@ -92,6 +92,15 @@ say so in the guide.
 1s timeout, and shutdown waits for that poll on every endpoint — which cost ~4s per test method
 before it was set, and dominated the whole suite. It affects teardown only, never a finding.
 
+**`NarayanaRequiredPolicy` is the single JTA policy — do not copy it into a probe.** It is a
+faithful copy of Quarkus's `TransactionalJtaTransactionPolicy`, which is what makes the JTA probes
+say anything about the application, and it takes optional sinks for the completion outcome and the
+error-handler frames. Three probes previously kept private copies; when one was found to leak a
+transaction on a setup failure, the fault had already been copied twice — the fidelity everyone
+wanted came bundled with scaffolding nobody re-read. Shared helpers are usually the wrong instinct
+in this repo (a probe should read as a self-contained claim), and this is the exception: subtle
+lifecycle code whose correctness is not the subject of any probe.
+
 **`ProbeSupport.createDataSource()` is overridable** so a probe can supply a bounded pool
 (`TransactedBackpressureProbe` uses HikariCP with `maximumPoolSize=2`). The default stays an
 unpooled H2 `JdbcDataSource`.

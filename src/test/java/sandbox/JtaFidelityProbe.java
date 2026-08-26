@@ -1,14 +1,9 @@
 package sandbox;
 
-import com.arjuna.ats.jta.TransactionManager;
-import jakarta.transaction.Status;
-import jakarta.transaction.Synchronization;
 import org.apache.camel.CamelContext;
 import org.apache.camel.builder.RouteBuilder;
-import org.apache.camel.jta.JtaTransactionPolicy;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
 import java.util.Set;
 import java.util.List;
 import java.util.concurrent.ConcurrentSkipListSet;
@@ -52,63 +47,7 @@ public class JtaFidelityProbe extends ProbeSupport {
      * commit. The application uses that class, so reproducing it here rather than inventing a policy
      * is what makes this probe say anything about the application.
      */
-    private class Required extends JtaTransactionPolicy {
-        @Override
-        public void run(Runnable runnable) throws Throwable {
-            var tm = TransactionManager.transactionManager();
-            boolean isNew = tm.getStatus() == Status.STATUS_NO_TRANSACTION
-                    || tm.getStatus() == Status.STATUS_MARKED_ROLLBACK;
-            // Everything after begin() lives inside the try: if setup throws, the transaction
-            // must still be ended, or it stays associated with the thread and the NEXT test fails
-            // with ARJUNA016051 for a reason that has nothing to do with it.
-            if (isNew) {
-                tm.begin();
-            }
-            try {
-                if (isNew) {
-                    tm.getTransaction().registerSynchronization(new Synchronization() {
-                        @Override
-                        public void beforeCompletion() {
-                        }
 
-                        @Override
-                        public void afterCompletion(int status) {
-                            outcomes.add(status == Status.STATUS_COMMITTED
-                                    ? "COMMITTED" : "ROLLED_BACK");
-                        }
-                    });
-                }
-                for (var f : Thread.currentThread().getStackTrace()) {
-                    if (f.getClassName().contains("ErrorHandler")) {
-                        handlers.add(f.getClassName());
-                    }
-                }
-                runnable.run();
-            } catch (Throwable e) {
-                if (isNew) {
-                    tm.rollback();
-                } else {
-                    tm.setRollbackOnly();
-                }
-                throw e;
-            }
-            if (isNew) {
-                tm.commit();
-            }
-        }
-    }
-
-    static {
-        // Narayana reads this once per JVM, so setting it per test was dead after the first.
-        try {
-            var dir = Files.createTempDirectory("narayana");
-            dir.toFile().deleteOnExit();
-            System.setProperty("ObjectStoreEnvironmentBean.objectStoreDir", dir.toString());
-            System.setProperty("com.arjuna.ats.arjuna.objectstore.objectStoreDir", dir.toString());
-        } catch (Exception e) {
-            throw new ExceptionInInitializerError(e);
-        }
-    }
 
     @Override
     protected CamelContext createCamelContext() throws Exception {
@@ -116,7 +55,7 @@ public class JtaFidelityProbe extends ProbeSupport {
         // Deliberately NOT named PROPAGATION_REQUIRED: ProbeSupport binds a Spring policy under
         // that name, and a bare .transacted() resolves it. Every route here must name this one
         // explicitly, or it silently runs under Spring — in the one probe whose point is not to.
-        context.getRegistry().bind("PROPAGATION_REQUIRED_JTA", new Required());
+        context.getRegistry().bind("PROPAGATION_REQUIRED_JTA", new NarayanaRequiredPolicy(outcomes::add, handlers::add));
         return context;
     }
 

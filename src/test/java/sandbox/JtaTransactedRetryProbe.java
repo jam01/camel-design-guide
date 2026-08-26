@@ -1,14 +1,9 @@
 package sandbox;
 
-import com.arjuna.ats.jta.TransactionManager;
-import jakarta.transaction.Status;
-import jakarta.transaction.Synchronization;
 import org.apache.camel.CamelContext;
 import org.apache.camel.builder.RouteBuilder;
-import org.apache.camel.jta.JtaTransactionPolicy;
 import org.junit.jupiter.api.Test;
 
-import java.nio.file.Files;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -46,56 +41,12 @@ public class JtaTransactedRetryProbe extends ProbeSupport {
     }
 
     /** Quarkus's TransactionalJtaTransactionPolicy.runWithTransaction, as in {@link JtaFidelityProbe}. */
-    private class Required extends JtaTransactionPolicy {
-        @Override
-        public void run(Runnable runnable) throws Throwable {
-            var tm = TransactionManager.transactionManager();
-            boolean isNew = tm.getStatus() == Status.STATUS_NO_TRANSACTION
-                    || tm.getStatus() == Status.STATUS_MARKED_ROLLBACK;
-            if (isNew) {
-                tm.begin();
-                tm.getTransaction().registerSynchronization(new Synchronization() {
-                    @Override
-                    public void beforeCompletion() {
-                    }
 
-                    @Override
-                    public void afterCompletion(int status) {
-                        outcomes.add(status == Status.STATUS_COMMITTED ? "COMMITTED" : "ROLLED_BACK");
-                    }
-                });
-            }
-            try {
-                runnable.run();
-            } catch (Throwable e) {
-                if (isNew) {
-                    tm.rollback();
-                } else {
-                    tm.setRollbackOnly();
-                }
-                throw e;
-            }
-            if (isNew) {
-                tm.commit();
-            }
-        }
-    }
-
-    static {
-        try {
-            var dir = Files.createTempDirectory("narayana");
-            dir.toFile().deleteOnExit();
-            System.setProperty("ObjectStoreEnvironmentBean.objectStoreDir", dir.toString());
-            System.setProperty("com.arjuna.ats.arjuna.objectstore.objectStoreDir", dir.toString());
-        } catch (Exception e) {
-            throw new ExceptionInInitializerError(e);
-        }
-    }
 
     @Override
     protected CamelContext createCamelContext() throws Exception {
         var context = super.createCamelContext();
-        context.getRegistry().bind("PROPAGATION_REQUIRED_JTA", new Required());
+        context.getRegistry().bind("PROPAGATION_REQUIRED_JTA", new NarayanaRequiredPolicy(outcomes::add));
         return context;
     }
 
