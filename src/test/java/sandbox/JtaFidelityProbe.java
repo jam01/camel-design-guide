@@ -58,25 +58,31 @@ public class JtaFidelityProbe extends ProbeSupport {
             var tm = TransactionManager.transactionManager();
             boolean isNew = tm.getStatus() == Status.STATUS_NO_TRANSACTION
                     || tm.getStatus() == Status.STATUS_MARKED_ROLLBACK;
+            // Everything after begin() lives inside the try: if setup throws, the transaction
+            // must still be ended, or it stays associated with the thread and the NEXT test fails
+            // with ARJUNA016051 for a reason that has nothing to do with it.
             if (isNew) {
                 tm.begin();
-                tm.getTransaction().registerSynchronization(new Synchronization() {
-                    @Override
-                    public void beforeCompletion() {
-                    }
-
-                    @Override
-                    public void afterCompletion(int status) {
-                        outcomes.add(status == Status.STATUS_COMMITTED ? "COMMITTED" : "ROLLED_BACK");
-                    }
-                });
-            }
-            for (var f : Thread.currentThread().getStackTrace()) {
-                if (f.getClassName().contains("ErrorHandler")) {
-                    handlers.add(f.getClassName());
-                }
             }
             try {
+                if (isNew) {
+                    tm.getTransaction().registerSynchronization(new Synchronization() {
+                        @Override
+                        public void beforeCompletion() {
+                        }
+
+                        @Override
+                        public void afterCompletion(int status) {
+                            outcomes.add(status == Status.STATUS_COMMITTED
+                                    ? "COMMITTED" : "ROLLED_BACK");
+                        }
+                    });
+                }
+                for (var f : Thread.currentThread().getStackTrace()) {
+                    if (f.getClassName().contains("ErrorHandler")) {
+                        handlers.add(f.getClassName());
+                    }
+                }
                 runnable.run();
             } catch (Throwable e) {
                 if (isNew) {

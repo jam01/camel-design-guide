@@ -66,6 +66,13 @@ mvn clean test              # all probes, ~30s — CHECK THE EXIT CODE, not the 
 mvn test -Dtest=OwnershipProbe
 ```
 
+**A stale class file lies about tests you did not touch.** Adding an anonymous inner class and
+running `mvn test` without `clean` can leave the old class file in place — `NoClassDefFoundError`
+on `Outer$1` at runtime. If that lands inside a transaction policy, the transaction is left
+associated with the thread and the *next* test fails with Narayana's ARJUNA016051, so one stale
+file produces failures in tests that passed minutes earlier. `mvn clean test` fixes it with no code
+change. (Reported by an independent reviewer; the same class of trap as the stale reports below.)
+
 **Never judge a run by grepping for "FAIL".** A compile error leaves the previous
 `target/surefire-reports/*.txt` in place, so a grep reads stale green results from the last
 successful build. This happened once and hid a broken `@Override` for several turns. Check
@@ -118,7 +125,7 @@ re-derive these; do challenge them if something contradicts them.
 | `onCompletion` scoping, three findings: a route-scoped hook fires for **every route the exchange visited** (innermost first); all hooks run after the **whole** routing, not per route, because they hang off the unit of work; and a route-scoped hook **replaces** the builder-scoped one for that route — two routes with their own hooks means a builder-wide hook never fires. | `OnCompletionScopeProbe` |
 | For HTTP there is **no setting that returns your own body on a failed exchange**. `muteException` defaults to **true** (empty body); setting it false sends the **stack trace**. Both force `text/plain`, and the message body is only read when no exception is present. | `VertxPlatformHttpSupport.handleExceptions`; `PlatformHttpEndpoint.muteException` |
 | **`shouldWrapInErrorHandler` is the unifying rule**: no error handler is installed inside `doTry`/`doCatch`/`doFinally`, inside `onException` clause bodies, inside `.circuitBreaker()`, or on `multicast()` children — parent chain included. This single method explains three findings measured separately here: redelivery cannot re-enter a breaker, a throwing compensation inside a clause is unhandled and replaces the original failure, and a throw inside `doCatch` reaches no clause. | `ProcessorDefinitionHelper.shouldWrapInErrorHandler`; `CircuitBreakerRetryProbe`, `ClauseProbe`, `CatchRethrowProbe` |
-| On a **transacted** route only the **per-clause** redelivery policy survives: builder-scoped and route-scoped handlers are replaced by the transaction handler, whose own policy defaults to 0. Measured under camel-jta: 1 / 1 / 3 attempts for builder / route / clause scope. | `JtaTransactedRetryProbe` |
+| On a **transacted** route what survives is **being a clause**, not where it is declared. Measured under camel-jta with the same `maximumRedeliveries(2)` in four places: builder handler **1**, route handler **1**, builder clause **3**, route clause **3**. Both handler scopes are replaced by the transaction handler (own policy defaults to 0) and fail silently; both clause scopes are still consulted. A route-scoped clause must be declared before `.transacted()`. | `JtaTransactedRetryProbe` |
 | Under **camel-jta each retry is its own transaction** (3 attempts → 3 rollbacks); under Spring all attempts share one. Both halves now measured rather than one being a javadoc claim. | `JtaTransactedRetryProbe`, `TransactedRetryProbe` |
 | **Two independent facts govern a throw from inside a `doCatch`, and conflating them is easy.** The *wrapping* rule decides whether **this route's** clauses fire — never, inside a catch. The *claim* decides whether **anyone else's** do. So a rethrow after an inline failure escapes unclaimed and **the caller's clause maps it normally**; a rethrow after a *called route* failed does not, because that route claimed and every later handler treats the exchange as finished. Same code, opposite outcome, decided by whether the thing inside `doTry` was inline or a route. | `CatchEscapeProbe`, `CatchRethrowProbe` |
 | A `direct:` call stays on the caller's thread; `.threads()`, `wireTap` and a queue endpoint each move to another one. | `ThreadingProbe` |
