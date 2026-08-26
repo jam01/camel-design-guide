@@ -292,6 +292,11 @@ Keep these unless there is a reason not to; they were argued over.
   next.
 - An error handler on a reusable stage is framed as a **declaration**: it claims the right to
   interrupt the consumer, and callers must respect it or defend against it.
+- **Do not oversell decline-by-default.** The guide argues that helper routes should decline so a
+  refactor cannot silently change who owns a failure — but a transacted route *cannot* decline, so
+  the convention excludes exactly the routes where the commit-on-failure bug lives. The honest
+  claim is that it shrinks the set you must think hard about down to the transaction boundaries,
+  which you then reason about one at a time. Stated at the `A transacted stage cannot decline` flag.
 - **The guide is product-neutral.** It names no internal class, test, repo path or product. Findings
   established against a real application go in as the finding, stated generically — a base
   `RouteBuilder` that registers clauses in `configure()`, not the class that happens to do it here.

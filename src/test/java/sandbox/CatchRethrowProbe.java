@@ -142,6 +142,19 @@ public class CatchRethrowProbe extends ProbeSupport {
 
                 from("direct:noop").log("ok");
 
+                // What EXCEPTION_CAUGHT actually holds inside the caller's catch, for a JTA-transacted
+                // callee. A caller that branches on the exception type to pick a status depends on this.
+                from("direct:record-caught-type")
+                        .doTry()
+                            .to("direct:transacted-callee")
+                        .doCatch(Exception.class)
+                            .process(ex -> {
+                                var caught = ex.getProperty(org.apache.camel.Exchange.EXCEPTION_CAUGHT,
+                                        Throwable.class);
+                                seen.add(caught == null ? "null" : caught.getClass().getName());
+                            })
+                        .end();
+
                 // No callee at all: the failure is raised inline, so nothing ever claims it.
                 from("direct:inline-throw-then-catch")
                         .doTry()
@@ -260,6 +273,15 @@ public class CatchRethrowProbe extends ProbeSupport {
 
         assertThat(seen).describedAs("recorded for the record, not asserted on").hasSize(2);
         System.out.println("STAMPS after claimed callee: " + seen);
+    }
+
+    @Test
+    void theCatchSeesTheOriginalExceptionUnwrapped_underJta() {
+        template.request("direct:record-caught-type", ex -> ex.getIn().setBody("in"));
+
+        assertThat(seen)
+                .describedAs("what a caller branching on exception type will actually match against")
+                .containsExactly(CalleeFailed.class.getName());
     }
 
     @Test
