@@ -117,6 +117,10 @@ re-derive these; do challenge them if something contradicts them.
 | `doTry`/`doCatch` **does** reach a failure from a transacted callee — the caller resumes after `end()`, and the callee's transaction still rolls back. This is the only recovery available against a stage that cannot decline. | `TransactedCatchProbe` |
 | `onCompletion` scoping, three findings: a route-scoped hook fires for **every route the exchange visited** (innermost first); all hooks run after the **whole** routing, not per route, because they hang off the unit of work; and a route-scoped hook **replaces** the builder-scoped one for that route — two routes with their own hooks means a builder-wide hook never fires. | `OnCompletionScopeProbe` |
 | For HTTP there is **no setting that returns your own body on a failed exchange**. `muteException` defaults to **true** (empty body); setting it false sends the **stack trace**. Both force `text/plain`, and the message body is only read when no exception is present. | `VertxPlatformHttpSupport.handleExceptions`; `PlatformHttpEndpoint.muteException` |
+| **`shouldWrapInErrorHandler` is the unifying rule**: no error handler is installed inside `doTry`/`doCatch`/`doFinally`, inside `onException` clause bodies, inside `.circuitBreaker()`, or on `multicast()` children — parent chain included. This single method explains three findings measured separately here: redelivery cannot re-enter a breaker, a throwing compensation inside a clause is unhandled and replaces the original failure, and a throw inside `doCatch` reaches no clause. | `ProcessorDefinitionHelper.shouldWrapInErrorHandler`; `CircuitBreakerRetryProbe`, `ClauseProbe`, `CatchRethrowProbe` |
+| On a **transacted** route only the **per-clause** redelivery policy survives: builder-scoped and route-scoped handlers are replaced by the transaction handler, whose own policy defaults to 0. Measured under camel-jta: 1 / 1 / 3 attempts for builder / route / clause scope. | `JtaTransactedRetryProbe` |
+| Under **camel-jta each retry is its own transaction** (3 attempts → 3 rollbacks); under Spring all attempts share one. Both halves now measured rather than one being a javadoc claim. | `JtaTransactedRetryProbe`, `TransactedRetryProbe` |
+| A `doCatch` can recover in place but **cannot delegate**: throwing inside it reaches no clause, and after `end()` the callee's claim makes `RedeliveryErrorHandler.isDone()` treat the exchange as finished, so clauses are skipped for later failures too. | `CatchRethrowProbe` |
 | A `direct:` call stays on the caller's thread; `.threads()`, `wireTap` and a queue endpoint each move to another one. | `ThreadingProbe` |
 | **`.threads()` is a silent no-op inside a transacted route.** `ThreadsProcessor.process` returns immediately when `exchange.isTransacted()` — "the transaction manager doesn't support using different threads in the same transaction". Measured: the step after the hop runs on the same thread and both writes stay in one transaction. Atomicity is safe; the concurrency you asked for is simply absent. **`seda:` is not suppressed this way** — it is a real endpoint and does leave both the thread and the transaction. | `ThreadingProbe`; `ThreadsProcessor` javadoc + `process` |
 | Camel's default thread pool profile: poolSize **10**, maxPoolSize **20**, maxQueueSize **1000**, keepAlive 60s, `allowCoreThreadTimeOut(true)`, rejectedPolicy **CallerRuns**. | `BaseExecutorServiceManager` ctor |
@@ -259,9 +263,8 @@ and passed even unfixed.
   each retry re-enters the route and therefore takes another permit. And nothing measures a
   breaker's effect on a transaction beyond `timeoutEnabled` and the `onFallback` commit above.
   Both look like diminishing returns rather than gaps.
-- Retries on a transacted route share **one** transaction under Spring (`TransactedRetryProbe`:
-  3 attempts, 1 commit decision). camel-jta's javadoc claims a fresh transaction per attempt —
-  still unmeasured there.
+- ~~camel-jta's per-attempt transaction claim.~~ **Measured** (`JtaTransactedRetryProbe`): three
+  attempts, three rollbacks. Spring shares one transaction across all attempts.
 - ~~`continued(true)` and rollback marks.~~ **Measured** (`ContinuedProbe`): it does erase a mark,
   but only when the mark and the failure come from the **same step** — a mark set earlier halts
   routing at the next step, so nothing throws and no clause fires.

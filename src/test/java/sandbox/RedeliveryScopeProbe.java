@@ -1,6 +1,8 @@
 package sandbox;
 
+import org.apache.camel.CamelContext;
 import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.processor.errorhandler.RedeliveryPolicy;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -31,6 +33,19 @@ public class RedeliveryScopeProbe extends ProbeSupport {
     /** Matched by a clause that has no outputs of its own. */
     public static class Bodyless extends RuntimeException { }
 
+    /** Matched by a clause with a body that points at a shared policy by name. */
+    public static class Referenced extends RuntimeException { }
+
+    @Override
+    protected CamelContext createCamelContext() throws Exception {
+        var context = super.createCamelContext();
+        var shared = new RedeliveryPolicy();
+        shared.setMaximumRedeliveries(2);
+        shared.setRedeliveryDelay(0);
+        context.getRegistry().bind("sharedPolicy", shared);
+        return context;
+    }
+
     private int count() {
         return attempts.size();
     }
@@ -50,6 +65,11 @@ public class RedeliveryScopeProbe extends ProbeSupport {
 
                 onException(Poison.class)
                         .handled(true).setBody(constant("poison"));
+
+                // A clause with a body AND a policy, named rather than restated.
+                onException(Referenced.class)
+                        .redeliveryPolicyRef("sharedPolicy")
+                        .handled(true).setBody(constant("referenced"));
 
                 // Matches and handles, but declares no steps — so it has no outputs. The only
                 // difference from the Poison clause above is that one adds a setBody.
@@ -84,6 +104,13 @@ public class RedeliveryScopeProbe extends ProbeSupport {
                         .process(ex -> {
                             attempts.add("a");
                             throw new Unmatched();
+                        });
+
+                from("direct:referenced")
+                        .errorHandler(defaultErrorHandler().maximumRedeliveries(0))
+                        .process(ex -> {
+                            attempts.add("a");
+                            throw new Referenced();
                         });
 
                 from("direct:route-scoped-bodyless")
@@ -173,5 +200,18 @@ public class RedeliveryScopeProbe extends ProbeSupport {
                         + "onException(X) inherits the handler's policy — so adding a single "
                         + "logging step to it is what silently turns retry off.")
                 .isEqualTo(4);
+    }
+
+    @Test
+    void aClauseWithABodyKeepsItsRetriesIfItNamesAPolicy() {
+        var body = template.requestBody("direct:referenced", "in", String.class);
+
+        assertThat(body).isEqualTo("referenced");
+        assertThat(count())
+                .describedAs("the reset only fires for a clause that declares no policy at all. "
+                        + "Pointing at one by name takes a different branch entirely, so a clause "
+                        + "can have both steps and retries — and the number lives in one place "
+                        + "rather than being restated on every clause that grew a body.")
+                .isEqualTo(3);
     }
 }
