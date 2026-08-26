@@ -33,6 +33,7 @@ public class CatchRethrowProbe extends ProbeSupport {
 
     private final List<String> mapped = new CopyOnWriteArrayList<>();
     private final List<String> seen = new CopyOnWriteArrayList<>();
+    private final List<String> resumed = new CopyOnWriteArrayList<>();
 
     public static class CalleeFailed extends RuntimeException {
     }
@@ -87,8 +88,7 @@ public class CatchRethrowProbe extends ProbeSupport {
                 onException(Translated.class)
                         .handled(true)
                         .process(ex -> mapped.add("translated"))
-                        .setBody(constant("503"))
-                        .process(ex -> seen.add("in-clause " + stamps(ex)));
+                        .setBody(constant("503"));
 
                 onException(Verdict.class)
                         .handled(true)
@@ -141,6 +141,24 @@ public class CatchRethrowProbe extends ProbeSupport {
                         });
 
                 from("direct:noop").log("ok");
+
+                // The case the application actually relies on: the failure is raised inline, so nothing
+                // claims it, and the catch block raises a domain exception in its place.
+                from("direct:calls-the-rethrower")
+                        .to("direct:inline-throw-then-rethrow-in-catch")
+                        .process(ex -> resumed.add("caller-resumed"));
+
+                from("direct:inline-throw-then-rethrow-in-catch")
+                        .doTry()
+                            .process(ex -> {
+                                throw new CalleeFailed();
+                            })
+                        .doCatch(Exception.class)
+                            .process(ex -> {
+                                throw new Translated();
+                            })
+                        .end()
+                        .setBody(constant("not-reached"));
 
                 // What EXCEPTION_CAUGHT actually holds inside the caller's catch, for a JTA-transacted
                 // callee. A caller that branches on the exception type to pick a status depends on this.
@@ -282,6 +300,42 @@ public class CatchRethrowProbe extends ProbeSupport {
         assertThat(seen)
                 .describedAs("what a caller branching on exception type will actually match against")
                 .containsExactly(CalleeFailed.class.getName());
+    }
+
+    @Test
+    void anExceptionThrownInsideDoCatchEscapesItsOwnRoutesClauses() {
+        var out = template.request("direct:inline-throw-then-rethrow-in-catch", ex -> ex.getIn().setBody("in"));
+
+        assertThat(mapped)
+                .describedAs("the route's own clause does not fire, even though nothing claimed the "
+                        + "exchange: children of a catch block are not wrapped in an error handler, so "
+                        + "there is nothing there to consult a clause")
+                .isEmpty();
+        assertThat(out.getException())
+                .describedAs("it comes back live and, importantly, UNCLAIMED -- which is what leaves it "
+                        + "available to whoever called this route")
+                .isInstanceOf(Translated.class);
+        assertThat(stamps(out)).contains("claimed=false");
+    }
+
+    @Test
+    void butTheCallersClauseDoesMapIt() {
+        var out = template.request("direct:calls-the-rethrower", ex -> ex.getIn().setBody("in"));
+
+        assertThat(mapped)
+                .describedAs("because it escaped unclaimed, the first error handler to see it is the "
+                        + "caller's, and that one maps it normally. So a route whose doCatch throws is "
+                        + "mapped by whoever called it -- and if the caller carries the same clauses, as "
+                        + "a shared HTTP base class arranges, it is indistinguishable from the route "
+                        + "having mapped itself.")
+                .containsExactly("translated");
+        assertThat(out.getMessage().getBody(String.class)).isEqualTo("503");
+        assertThat(out.getException())
+                .describedAs("and it leaves clean, so an HTTP edge renders the mapped body")
+                .isNull();
+        assertThat(resumed)
+                .describedAs("the caller does not resume past the call, as with any handled failure")
+                .isEmpty();
     }
 
     @Test

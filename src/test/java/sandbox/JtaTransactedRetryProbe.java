@@ -30,6 +30,7 @@ public class JtaTransactedRetryProbe extends ProbeSupport {
     private final List<String> builderAttempts = new CopyOnWriteArrayList<>();
     private final List<String> clauseAttempts = new CopyOnWriteArrayList<>();
     private final List<String> routeAttempts = new CopyOnWriteArrayList<>();
+    private final List<String> routeClauseAttempts = new CopyOnWriteArrayList<>();
     private final List<String> outcomes = new CopyOnWriteArrayList<>();
 
     public static class BuilderRetry extends RuntimeException {
@@ -39,6 +40,9 @@ public class JtaTransactedRetryProbe extends ProbeSupport {
     }
 
     public static class RouteRetry extends RuntimeException {
+    }
+
+    public static class RouteClauseRetry extends RuntimeException {
     }
 
     /** Quarkus's TransactionalJtaTransactionPolicy.runWithTransaction, as in {@link JtaFidelityProbe}. */
@@ -123,6 +127,19 @@ public class JtaTransactedRetryProbe extends ProbeSupport {
                             throw new ClauseRetry();
                         });
 
+                // Level 3 again, but scoped to the route rather than the builder. Declared before
+                // .transacted(), which is the only valid placement for a route-scoped clause.
+                from("direct:jta-route-clause-retry")
+                        .onException(RouteClauseRetry.class)
+                            .maximumRedeliveries(2).redeliveryDelay(0)
+                        .end()
+                        .transacted("PROPAGATION_REQUIRED_JTA")
+                        .to(insertRow("route-clause"))
+                        .process(ex -> {
+                            routeClauseAttempts.add("a");
+                            throw new RouteClauseRetry();
+                        });
+
                 // Level 2: a route-scoped handler, declared before .transacted().
                 from("direct:jta-route-retry")
                         .errorHandler(defaultErrorHandler().maximumRedeliveries(2).redeliveryDelay(0))
@@ -166,6 +183,17 @@ public class JtaTransactedRetryProbe extends ProbeSupport {
         // Deliberately no assertion on rows(): as in JtaFidelityProbe, the H2 DataSource here is not
         // enlisted in the JTA transaction, so what this harness measures is Camel's commit/rollback
         // decision and Narayana's execution of it, not the data. The application's datasource is enlisted.
+    }
+
+    @Test
+    void aRouteScopedClauseCarriesItsRedeliveryToo() {
+        template.request("direct:jta-route-clause-retry", ex -> ex.getIn().setBody("in"));
+
+        assertThat(routeClauseAttempts)
+                .describedAs("scoping the clause to the route rather than the builder changes nothing: "
+                        + "what survives .transacted() is being a clause, not where the clause is "
+                        + "declared. Use whichever scope the route deserves.")
+                .hasSize(3);
     }
 
     @Test
