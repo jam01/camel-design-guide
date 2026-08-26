@@ -115,6 +115,18 @@ public class CatchRestoreProbe extends ProbeSupport {
                         .end()
                         .process(ex -> trace.add("after-end ran"));
 
+                // A mark set inside a doTry with nothing thrown: what is left of the block?
+                from("direct:mark-inside-try")
+                        .doTry()
+                            .process(ex -> ex.setRollbackOnly(true))
+                            .process(ex -> trace.add("try-step-2"))
+                        .doCatch(Boom.class)
+                            .process(ex -> trace.add("catch"))
+                        .doFinally()
+                            .process(ex -> trace.add("finally"))
+                        .end()
+                        .process(ex -> trace.add("after-end"));
+
                 from("direct:rollback-exception")
                         .doTry()
                             .process(ex -> {
@@ -209,6 +221,20 @@ public class CatchRestoreProbe extends ProbeSupport {
                         + "it — and the step after end() does not run, because it was restored")
                 .containsExactly("in-catch mark=false");
         assertThat(out.isRollbackOnly()).isTrue();
+    }
+
+    @Test
+    void aMarkInsideATryLeavesOnlyTheFinallyRunning() {
+        var out = template.request("direct:mark-inside-try", ex -> ex.getIn().setBody("in"));
+
+        assertThat(trace)
+                .describedAs("the try body halts at the step after the mark, so nothing throws; the "
+                        + "catch is entered but exits at CatchProcessor:124 with no exception; the "
+                        + "finally still runs; and the outer pipeline stops after end()")
+                .containsExactly("finally");
+        assertThat(out.isRollbackOnly())
+                .describedAs("and the abort stands")
+                .isTrue();
     }
 
     @Test
