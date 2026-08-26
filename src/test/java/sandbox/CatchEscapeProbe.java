@@ -14,6 +14,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 public class CatchEscapeProbe extends ProbeSupport {
 
+    private final java.util.List<String> inCatch = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final java.util.List<String> afterEnd = new java.util.concurrent.CopyOnWriteArrayList<>();
+
     @Override
     protected RouteBuilder[] createRouteBuilders() {
         var caller = new RouteBuilder() {
@@ -22,6 +25,16 @@ public class CatchEscapeProbe extends ProbeSupport {
                 onException(Boom.class).handled(true).setBody(constant("MAPPED"));
 
                 from("direct:calls-inline").to("direct:rethrows-after-inline");
+
+                // Catch a failure from a callee that claimed it, then keep going.
+                from("direct:catches-claimed")
+                        .doTry()
+                            .to("direct:claims-it")
+                        .doCatch(OtherBoom.class)
+                            .process(ex -> inCatch.add(stamps(ex)))
+                        .end()
+                        .process(ex -> afterEnd.add(stamps(ex)))
+                        .setBody(constant("CONTINUED"));
                 from("direct:calls-claimed").to("direct:rethrows-after-claimed");
             }
         };
@@ -91,5 +104,26 @@ public class CatchEscapeProbe extends ProbeSupport {
         assertThat(out.getException())
                 .describedAs("it leaves the route failed, which at an HTTP edge means an empty body")
                 .isNotNull();
+    }
+
+    @Test
+    void doCatchClearsTheExceptionButNotTheClaim() {
+        var out = template.request("direct:catches-claimed", ex -> ex.getIn().setBody("in"));
+
+        assertThat(out.getMessage().getBody(String.class))
+                .describedAs("the route carried on past end()")
+                .isEqualTo("CONTINUED");
+        assertThat(inCatch).hasSize(1);
+        assertThat(inCatch.get(0))
+                .describedAs("inside the catch the exception is gone — that is what lets routing "
+                        + "resume — but the claim is still on the exchange")
+                .contains("exception=false")
+                .contains("claimed=true");
+        assertThat(afterEnd.get(0))
+                .describedAs("and it is still there after end(). Routing continued because the "
+                        + "exception was cleared, not because the claim was: the claim is not one "
+                        + "of the things the continue-routing check consults. It governs which "
+                        + "clauses may fire, and it governs that for the rest of the exchange's life.")
+                .contains("claimed=true");
     }
 }

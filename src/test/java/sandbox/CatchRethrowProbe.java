@@ -113,6 +113,31 @@ public class CatchRethrowProbe extends ProbeSupport {
 
                 // The case the application actually relies on: the failure is raised inline, so nothing
                 // claims it, and the catch block raises a domain exception in its place.
+                // The untested cell: a caller, whose callee's doCatch caught a CLAIMED failure and then
+                // raised its own. Distinct from direct:calls-the-rethrower, where the failure was inline.
+                from("direct:calls-the-rethrower-after-claimed")
+                        .to("direct:rethrow-after-transacted-callee")
+                        .process(ex -> resumed.add("caller-resumed"));
+
+                // How much of the exchange still works once a claim is on it: does a LATER doTry/doCatch
+                // still catch, does routing still reach the end, and is a later failure still unmappable.
+                from("direct:life-after-a-claim")
+                        .doTry()
+                            .to("direct:transacted-callee")
+                        .doCatch(Exception.class)
+                            .process(ex -> resumed.add("first-catch"))
+                        .end()
+                        .process(ex -> resumed.add("between " + stamps(ex)))
+                        .doTry()
+                            .process(ex -> {
+                                throw new CalleeFailed();
+                            })
+                        .doCatch(Exception.class)
+                            .process(ex -> resumed.add("second-catch"))
+                        .end()
+                        .setHeader("rendered-by-hand", constant(503))
+                        .process(ex -> resumed.add("reached-end"));
+
                 from("direct:calls-the-rethrower")
                         .to("direct:inline-throw-then-rethrow-in-catch")
                         .process(ex -> resumed.add("caller-resumed"));
@@ -305,6 +330,51 @@ public class CatchRethrowProbe extends ProbeSupport {
         assertThat(resumed)
                 .describedAs("the caller does not resume past the call, as with any handled failure")
                 .isEmpty();
+    }
+
+    @Test
+    void norDoesTheCallersClauseMapAThrowAfterAClaimedCallee() {
+        var out = template.request("direct:calls-the-rethrower-after-claimed", ex -> ex.getIn().setBody("in"));
+
+        assertThat(mapped)
+                .describedAs("the claim survives the intervening doCatch and suppresses the CALLER's "
+                        + "clause as well. So the escape hatch in butTheCallersClauseDoesMapIt is only "
+                        + "available when the failure inside the doTry was inline: once a called route "
+                        + "claimed it, no handler anywhere maps a throw from that catch.")
+                .isEmpty();
+        assertThat(out.getException())
+                .describedAs("it reaches the caller live, and at an HTTP edge that is the empty 500")
+                .isInstanceOf(Translated.class);
+        assertThat(stamps(out))
+                .describedAs("and this is why: doCatch clears the EXCEPTION, which is what lets routing "
+                        + "continue past end(), but it does not clear the CLAIM. The two are independent "
+                        + "-- continuation is gated on isFailed/isRollbackOnly/errorHandlerHandled, none "
+                        + "of which is failureHandled, while eligibility to be mapped is gated on "
+                        + "failureHandled via RedeliveryErrorHandler.isDone. A route can therefore carry "
+                        + "on normally and still be unmappable for the rest of its life.")
+                .contains("claimed=true");
+    }
+
+    @Test
+    void aClaimedExchangeStillRoutes_catchesAndSetsHeaders_itOnlyLosesMapping() {
+        var out = template.request("direct:life-after-a-claim", ex -> ex.getIn().setBody("in"));
+
+        assertThat(resumed)
+                .describedAs("everything structural still works on a claimed exchange: a later "
+                        + "doTry/doCatch still catches, routing still reaches the end of the route")
+                .containsExactly("first-catch", "between exception=false claimed=true handled=false rollbackMark=false",
+                        "second-catch", "reached-end");
+        assertThat(out.getMessage().getHeader("rendered-by-hand"))
+                .describedAs("and a response set by hand still lands -- setHeader/setBody do not consult "
+                        + "the claim, which is why rendering works where throwing does not")
+                .isEqualTo(503);
+        assertThat(mapped)
+                .describedAs("the ONLY thing lost is eligibility to be mapped by a clause, for the rest "
+                        + "of the exchange's life")
+                .isEmpty();
+        assertThat(out.getException())
+                .describedAs("and the exchange ends clean here, because nothing was left thrown")
+                .isNull();
     }
 
     @Test
