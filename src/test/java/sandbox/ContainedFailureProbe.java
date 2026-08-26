@@ -90,7 +90,7 @@ public class ContainedFailureProbe extends ProbeSupport {
     }
 
     @Test
-    void aStageThatKeepsItsFailureToItselfLeavesTheExchangeClean() {
+    void swallowingAFailureLeavesTheExchangeCleanAndTheWorkCOMMITTED() throws Exception {
         var out = template.request("direct:caller", ex -> ex.getIn().setBody("in"));
 
         assertThat(steps)
@@ -103,5 +103,9 @@ public class ContainedFailureProbe extends ProbeSupport {
                 .containsExactly("edge-mapped");
         assertThat(out.getMessage().getBody(String.class)).isEqualTo("EDGE-MAPPED");
         assertThat(out.getException()).isNull();
+        assertThat(rows())
+                .describedAs("and here is the price: the stage failed, nothing reached the "
+                        + "transaction boundary, so the work COMMITTED. Do not reach for this.")
+                .isEqualTo(1);
     }
 }
