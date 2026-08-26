@@ -121,7 +121,9 @@ public class ContinueExchangeProbe extends ProbeSupport {
         assertThat(ex.isRollbackOnly())
                 .describedAs("continued(true) clears the rollback mark and the guide flags that as "
                         + "a hazard — an abort silently revoked by something that never mentions "
-                        + "transactions. Restoring mappability is no reason to repeat it.")
+                        + "transactions. Restoring mappability is no reason to repeat it. Inside a "
+                        + "catch it could not be cleared anyway (CatchRestoreProbe); this asserts "
+                        + "the intent directly, where nothing is restoring it.")
                 .isTrue();
         assertThat(ex.getExchangeExtension().isFailureHandled())
                 .describedAs("while the claim, which is the whole point, is gone")

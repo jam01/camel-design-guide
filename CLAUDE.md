@@ -139,7 +139,8 @@ re-derive these; do challenge them if something contradicts them.
 | **Swallowing a failure to keep the exchange clean is a TRAP, not a technique.** A stage that catches its own failure internally does come back unclaimed — because nothing failed as far as the boundary is concerned, so a transacted stage doing this **commits** the work it meant to undo. Commit-on-failure in a different outfit. Kept as a probe because it is an attractive-looking wrong answer. | `ContainedFailureProbe` |
 | **`doCatch` is already SimpleTask-shaped.** `CatchProcessor:151-153` sets `EXCEPTION_HANDLED`, records `EXCEPTION_CAUGHT` and clears the exception — the same bookkeeping `SimpleTask.prepareExchangeForContinue` does. So a catch needs only the *flags* cleared, not the bookkeeping redone. But SimpleTask is still the wrong donor: it never clears `failureHandled` (so it would not restore mappability at all) and it sets `errorHandlerHandled(true)`, which `PipelineHelper.continueProcessing` treats as **stop**. | `CatchProcessor`, `PipelineHelper.continueProcessing` |
 | **There are TWO `prepareExchangeForContinue` methods in `RedeliveryErrorHandler` and they disagree.** `SimpleTask`'s removes `EXCEPTION_CAUGHT` and sets `errorHandlerHandled(true)` while never clearing the claim; `RedeliveryTask`'s clears the claim and leaves the verdict alone. Only the latter can apply to `continued(true)`: `simpleTask` is chosen only when `exceptionPolicies` is empty, and a continued clause is itself a policy. Cite the `RedeliveryTask` one. | `RedeliveryErrorHandler:754` vs `:1234`, selection at `:1983` |
-| **`ContinueExchangeProcessor`** is the sandbox's workaround: `prepareExchangeForContinue`'s reset plus `setErrorHandlerHandled(null)`, used inside a `doCatch`. Measured in the shape with no other answer — transacted stage throws and rolls back, caller catches, later failure maps normally on a clean exchange. Reaches into `ExchangeExtension`; intended to be replaced by an upstream lever on `doCatch`. | `ContinueExchangeProbe` |
+| **A catch SNAPSHOTS `routeStop`, `rollbackOnly` and `rollbackOnlyLast` on entry and RESTORES them in its callback** (`CatchProcessor:134-139`, `:173-181`). Three measured consequences: the rollback mark reads `false` inside the body and is true again after `end()`; clearing it from inside is discarded on the way out; and a marked exchange **stops routing at the first step after `end()`**, so a repair placed there is never reached. Plus a sharper case — on a marked exchange a caught `RollbackExchangeException` is re-set on the exchange after the body. `failureHandled` and `errorHandlerHandled` are in neither snapshot, which is why they are the two a repair can clear. | `CatchRestoreProbe`; `CatchProcessor` |
+| **`ContinueExchangeProcessor` is exactly two lines**, `setFailureHandled(false)` + `setErrorHandlerHandled(null)`, placed **inside** the `doCatch`. `setRouteStop(false)` and `setRedeliveryExhausted(false)` were dropped as dead: the catch clears both before the body runs and clears exhausted again afterwards. Message hygiene from `prepareExchangeForContinue` (stream cache, redelivery headers) is kept. Measured in the shape with no other answer — transacted stage throws and rolls back, caller catches, later failure maps normally on a clean exchange. Reaches into `ExchangeExtension`; intended to be replaced by an upstream lever on `doCatch`. | `ContinueExchangeProbe`, `CatchRestoreProbe` |
 | **`continued(true)` can fire twice** on one exchange — it clears the claim every time. CAMEL-5139's complaint is fixed. This is why the clause system copes with repeated failures and `doCatch` does not: the reset was attached to clauses. | `ContainedFailureProbe` |
 | **The cleanse works and is repeatable.** Setting exception/rollbackOnly/rollbackOnlyLast/routeStop clear, plus `setFailureHandled(false)` and `setErrorHandlerHandled(null)` and `setRedeliveryExhausted(false)`, restores a claimed exchange completely: the next stage's clause fires, body sets, exchange leaves clean — and it works between every stage, not once. Caveats: `ExchangeExtension` is not application-facing API, and it destroys the record that an earlier stage failed. | `CleanseProbe` |
 | **No construct performs a full reset.** `doCatch` clears the exception only (claim kept, handled pinned `false`). `continued(true)` clears exception, rollback mark and claim — but it is a *clause*, and a claimed exchange never reaches a clause, so it can never repair inherited state. A copy sheds the claim but keeps `handled` pinned. Only clearing both flags by hand is complete. | `ErrorStateResetProbe`, `ClaimResetProbe` |
@@ -304,6 +305,72 @@ aggregating). Upstream would fairly say poking internal state is not a defect.
 `errorHandlerHandled`, `rollbackOnly`, `rollbackOnlyLast`, `routeStop` and `redeliveryExhausted` —
 and NOT `failureHandled`. Two flags that jointly decide mappability, copied inconsistently. A route
 where a copy is routed onward and then fails would make the case without touching internals.
+
+## Second candidate ticket — a continue lever on `doCatch` (worked out, not filed)
+
+Distinct from the one above and much easier to defend, because it asks for an addition rather than
+claiming a defect.
+
+**Ask:** `doCatch(X).continued(true)`, clearing `failureHandled` and `errorHandlerHandled` inside
+`CatchProcessor.process` **before** `processor.process(...)` at `:165` — joining the
+clear-and-leave-cleared group at `:151-155`, never the snapshot group at `:134-139`. Before the body,
+because the body will often call another route and that route's clauses can only map its own
+failures once the claim is gone. `null`, not `false`: `false` is the sticky value that restores the
+exception at `RedeliveryErrorHandler:1622`.
+
+**Why that name.** The whole delta between what a catch does and what `prepareExchangeForContinue`
+does is those two flags — exception, `EXCEPTION_CAUGHT`, `EXCEPTION_HANDLED` and
+`redeliveryExhausted` are already identical. Two benign narrowings: resumption point is already
+fixed by `end()`, and it cannot clear the rollback mark (the snapshot restores it) — which is the
+half the guide calls a hazard. Rejected: `handled(true)` (taken, adjacent enough to confuse),
+`clearErrorState()`/`resetErrorHandling()` (names the mechanism, invites use as a general cleanser).
+
+**It SHOULD clear the rollback mark** — reversed after measurement. Two earlier drafts of this note
+argued against it; both rested on claims that turned out to be false, recorded here so they are not
+re-derived:
+
+- *Retracted:* "a clause sees only its own failure's mark, a catch sees anything." Wrong — a mark
+  inside a `doTry` halts the try body like anywhere else (`TryProcessor.next()` returns three
+  *parts*, and its routeStop-only gate governs advancing between those; the try body is an ordinary
+  Pipeline gating on the mark). Both constructs can only ever meet a mark set by the same step that
+  threw. No asymmetry.
+- *Retracted:* "clearing it would be one route revoking another route's abort, unlike a clause."
+  Wrong — measured in `ClauseMarkErasureProbe`: a declining callee marks and throws, and the
+  **caller's** clause revokes it. Clauses are cross-route too.
+- *Retracted:* "don't smuggle a transaction decision into an error-handling boolean." That is what
+  `continued(true)` does today, so the objection could only ever have been *don't widen it* — and
+  per the finding below there is nothing to widen.
+
+The finding that settles it: `RedeliveryErrorHandler:1453-1462` clears `rollbackOnly` under
+`isDeadLetterChannel || shouldHandle || shouldContinue`, **before** any branch-specific work. So
+`handled(true)` erases the mark identically to `continued(true)`, and `prepareExchangeForContinue`'s
+own `setRollbackOnly(false)` at `:1241` is a redundant second clear. Erasure belongs to *resolving a
+failure in a clause*, not to one keyword. A `doCatch` lever that cleared the mark is therefore
+consistent with the clause system rather than an extension of it.
+
+Supporting: the per-branch case is real and measured — one clause continues, its sibling maps and
+stops. And the risk is low where it matters: in the shape the lever exists for (transacted callee
+throws, caller catches) there is **no mark at all**, because gate 2's `exception != null` did the
+rollback. The mark is absent exactly where the users are.
+
+Residual nuance worth stating in the ticket, not a blocker: the mark conflates *abort* with *stop*
+(the stop is emergent, via gate 1 — `RollbackProcessor` sets one flag and does not touch
+`routeStop`). Continue has a legitimate claim only on the stop half, and clearing the mark is the
+only way to get it. Note also `continued(true)` clears `rollbackOnly` and leaves `rollbackOnlyLast`,
+while `CatchProcessor` snapshots both.
+
+**Smaller fallback ask:** `ExchangeHelper.setFailureHandled(Exchange)` is public at `:654` but
+one-way. A public counterpart clearing both flags makes the workaround supported with no DSL change
+and no behaviour change to anything existing.
+
+**Why `continued(true)` omits the verdict, for the ticket's background section.** Not because it is
+only ever `false` — `:1639` sets `true`, `:1679` sets `false`. The three branches at `:1633/:1637/
+:1672` are exclusive and continue is the one that never writes it, so there is nothing from that
+pass to undo. An inherited verdict cannot reach it either: `alreadySet` returns at `:1630` *before*
+`shouldContinue` is consulted, and separately the verdict's only writers sit below the unconditional
+`setFailureHandled` at `:1615`, so **verdict set implies claimed** and a clause never runs on a
+claimed exchange. The invariant holds everywhere except an exchange copy — which is exactly the hole
+the other candidate ticket rests on.
 
 ## Upstream tickets on the sticky-claim family
 
