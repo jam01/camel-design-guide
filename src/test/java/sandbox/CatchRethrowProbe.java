@@ -313,7 +313,7 @@ public class CatchRethrowProbe extends ProbeSupport {
     }
 
     @Test
-    void butTheCallersClauseDoesMapIt() {
+    void butTheCallersClauseDoesMapItForAnInlineFailure() {
         var out = template.request("direct:calls-the-rethrower", ex -> ex.getIn().setBody("in"));
 
         assertThat(mapped)
@@ -338,7 +338,7 @@ public class CatchRethrowProbe extends ProbeSupport {
 
         assertThat(mapped)
                 .describedAs("the claim survives the intervening doCatch and suppresses the CALLER's "
-                        + "clause as well. So the escape hatch in butTheCallersClauseDoesMapIt is only "
+                        + "clause as well. So the escape hatch in butTheCallersClauseDoesMapItForAnInlineFailure is only "
                         + "available when the failure inside the doTry was inline: once a called route "
                         + "claimed it, no handler anywhere maps a throw from that catch.")
                 .isEmpty();
