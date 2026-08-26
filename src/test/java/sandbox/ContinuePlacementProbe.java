@@ -85,6 +85,26 @@ public class ContinuePlacementProbe extends ProbeSupport {
                         .end()
                         .process(ex -> trace.add("resumed"));
 
+                // Shape 3: compensate on the claimed exchange, guard it by hand, reset afterwards.
+                from("direct:outer-shape-three")
+                        .to("direct:shape-three");
+
+                from("direct:shape-three")
+                        .doTry()
+                            .to("direct:claiming-stage")
+                        .doCatch(Boom.class)
+                            .doTry()
+                                .to("direct:compensate")
+                            .doCatch(CompensationFailed.class)
+                                .process(ex -> trace.add("inner-catch"))
+                            .end()
+                            .process(RECOVERED)
+                            .process(ex -> trace.add("reset-reached"))
+                        .end()
+                        .process(ex -> {
+                            throw new LateBoom();
+                        });
+
                 from("direct:reset-last")
                         .doTry()
                             .to("direct:claiming-stage")
@@ -155,6 +175,19 @@ public class ContinuePlacementProbe extends ProbeSupport {
         assertThat(out.getException())
                 .describedAs("on a clean exchange, so at an edge this body actually ships")
                 .isNull();
+    }
+
+    @Test
+    void aNestedGuardLetsTheCatchBodyCarryOnToAResetPlacedAfterIt() {
+        var out = template.request("direct:outer-shape-three", ex -> ex.getIn().setBody("in"));
+
+        assertThat(trace)
+                .describedAs("the compensation route's own clause cannot fire on a claimed "
+                        + "exchange, so its failure reaches the nested catch by hand; nothing wrote "
+                        + "a verdict, so the catch body carries on to the reset after it; and the "
+                        + "later failure is then mappable again")
+                .containsExactly("inner-catch", "reset-reached", "caller-mapped-late");
+        assertThat(out.getMessage().getBody(String.class)).isEqualTo("MAPPED-LATE");
     }
 
     @Test
