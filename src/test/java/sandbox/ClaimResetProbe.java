@@ -66,6 +66,22 @@ public class ClaimResetProbe extends ProbeSupport {
                             throw new Boom();
                         });
 
+                // Do the constructs that copy actually land on that same path?
+                from("direct:tap-after-claim")
+                        .doTry()
+                            .to("direct:claims-it")
+                        .doCatch(OtherBoom.class)
+                        .end()
+                        .wireTap("direct:tapped")
+                        .process(ex -> copyState.add("origin=" + ExchangeHelper.isFailureHandled(ex)));
+
+                from("direct:enrich-after-claim")
+                        .doTry()
+                            .to("direct:claims-it")
+                        .doCatch(OtherBoom.class)
+                        .end()
+                        .enrich("direct:resource", (a, b) -> a);
+
                 // Does a copy shed the claim?
                 from("direct:copy-after-claim")
                         .doTry()
@@ -90,7 +106,17 @@ public class ClaimResetProbe extends ProbeSupport {
             }
         };
 
-        return new RouteBuilder[] { caller, claiming };
+        var copies = new RouteBuilder() {
+            @Override
+            public void configure() {
+                from("direct:tapped")
+                        .process(ex -> copyState.add("tapped=" + ExchangeHelper.isFailureHandled(ex)));
+                from("direct:resource")
+                        .process(ex -> copyState.add("enriched=" + ExchangeHelper.isFailureHandled(ex)));
+            }
+        };
+
+        return new RouteBuilder[] { caller, claiming, copies };
     }
 
     @Test
@@ -143,5 +169,21 @@ public class ClaimResetProbe extends ProbeSupport {
                         + "wireTap, enrich, a split — starts clean, and the claim is confined to "
                         + "the exchange that earned it.")
                 .containsExactly("original=true copy=false");
+    }
+
+    @Test
+    void wireTapAndEnrichBothLandOnThatSamePath() throws Exception {
+        template.request("direct:tap-after-claim", ex -> ex.getIn().setBody("in"));
+        for (int i = 0; i < 60 && copyState.size() < 2; i++) {
+            Thread.sleep(25);
+        }
+        template.request("direct:enrich-after-claim", ex -> ex.getIn().setBody("in"));
+
+        assertThat(copyState)
+                .describedAs("both give the downstream route an exchange with no claim on it, while "
+                        + "the origin keeps its own — because each goes through Exchange.copy(), "
+                        + "and a copy is built with a fresh ExtendedExchangeExtension where "
+                        + "failureHandled is simply a field that starts false")
+                .contains("tapped=false", "enriched=false", "origin=true");
     }
 }
