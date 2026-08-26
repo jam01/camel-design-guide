@@ -18,6 +18,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 public class ContinuedProbe extends ProbeSupport {
 
+    public static class ThirdBoom extends RuntimeException {
+    }
+
     private final List<String> outcomes = new CopyOnWriteArrayList<>();
     private final List<String> steps = new CopyOnWriteArrayList<>();
 
@@ -38,6 +41,16 @@ public class ContinuedProbe extends ProbeSupport {
             public void configure() {
                 onException(Boom.class).continued(true);
 
+                // What the clause body sees, and what happens to a failure of its own.
+                onException(ThirdBoom.class)
+                        .continued(true)
+                        .process(ex -> steps.add(
+                                "body claimed=" + ex.getExchangeExtension().isFailureHandled()))
+                        .process(ex -> {
+                            throw new IllegalStateException("compensation blew up");
+                        })
+                        .process(ex -> steps.add("body-step-after-throw"));
+
                 from("direct:continue-plain")
                         .transacted()
                         .process(ex -> watch())
@@ -49,6 +62,12 @@ public class ContinuedProbe extends ProbeSupport {
 
                 // Mark and throw in the SAME step, so the failure reaches the clause before the
                 // mark has had a chance to stop the route.
+                from("direct:continued-body-throws")
+                        .process(ex -> {
+                            throw new ThirdBoom();
+                        })
+                        .process(ex -> steps.add("route resumed"));
+
                 from("direct:mark-and-throw-together")
                         .transacted()
                         .process(ex -> watch())
@@ -76,6 +95,32 @@ public class ContinuedProbe extends ProbeSupport {
                         .process(ex -> steps.add("after"));
             }
         };
+    }
+
+    @Test
+    void aContinuedClauseBodyRunsOnAnUnclaimedExchange() {
+        template.request("direct:continued-body-throws", ex -> ex.getIn().setBody("in"));
+
+        assertThat(steps)
+                .describedAs("the claim is not set until prepareExchangeAfterFailure runs in the "
+                        + "failure processor's DONE callback, so the clause body never sees one")
+                .contains("body claimed=false");
+    }
+
+    @Test
+    void aThrowInsideAContinuedClauseBodyCancelsTheContinueEntirely() {
+        var out = template.request("direct:continued-body-throws", ex -> ex.getIn().setBody("in"));
+
+        assertThat(steps)
+                .describedAs("the route does NOT resume. FatalFallbackErrorHandler:133,143 shadows "
+                        + "EXCEPTION_CAUGHT with the new exception and pins errorHandlerHandled to "
+                        + "false; prepareExchangeAfterFailure's alreadySet branch at :1617-1630 then "
+                        + "restores it and returns BEFORE shouldContinue is consulted")
+                .containsExactly("body claimed=false");
+        assertThat(out.getException())
+                .describedAs("and the compensation's failure has replaced the original, exactly as "
+                        + "it does for handled(true) — continued(true) gets no special protection")
+                .isInstanceOf(IllegalStateException.class);
     }
 
     @Test

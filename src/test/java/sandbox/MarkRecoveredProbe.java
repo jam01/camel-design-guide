@@ -11,13 +11,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Whether {@link ContinueExchangeProcessor} actually buys back what a claim took, when used where
+ * Whether {@link MarkRecovered} actually buys back what a claim took, when used where
  * it is meant to be used: inside a {@code doCatch}, recovering from a transacted callee that failed
  * and rolled back properly.
  */
-public class ContinueExchangeProbe extends ProbeSupport {
+public class MarkRecoveredProbe extends ProbeSupport {
 
-    private static final ContinueExchangeProcessor CONTINUE = new ContinueExchangeProcessor();
+    private static final MarkRecovered RECOVERED = MarkRecovered.INSTANCE;
 
     private final List<String> mapped = new CopyOnWriteArrayList<>();
 
@@ -46,7 +46,7 @@ public class ContinueExchangeProbe extends ProbeSupport {
                         .doTry()
                             .to("direct:tx-stage")
                         .doCatch(OtherBoom.class)
-                            .process(CONTINUE)
+                            .process(RECOVERED)
                         .end()
                         .process(ex -> {
                             throw new Boom();
@@ -116,7 +116,7 @@ public class ContinueExchangeProbe extends ProbeSupport {
         ex.setRollbackOnly(true);
         ex.getExchangeExtension().setFailureHandled(true);
 
-        CONTINUE.process(ex);
+        RECOVERED.process(ex);
 
         assertThat(ex.isRollbackOnly())
                 .describedAs("continued(true) clears the rollback mark and the guide flags that as "

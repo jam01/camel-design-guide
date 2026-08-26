@@ -127,6 +127,27 @@ public class CatchRestoreProbe extends ProbeSupport {
                         .end()
                         .process(ex -> trace.add("after-end"));
 
+                // Does route state SET BY THE CATCH BODY survive the restore on the way out?
+                // The restore block runs only when the snapshot had something in it, and then
+                // overwrites all three from the snapshot.
+                from("direct:body-marks-clean-snapshot")
+                        .doTry()
+                            .to("direct:claiming-callee")
+                        .doCatch(Boom.class)
+                            .markRollbackOnly()
+                        .end();
+
+                from("direct:body-marks-dirty-snapshot")
+                        .doTry()
+                            .process(ex -> {
+                                ex.setRollbackOnlyLast(true);
+                                throw new Boom();
+                            })
+                        .doCatch(Boom.class)
+                            .process(ex -> ex.setRouteStop(true))
+                            .markRollbackOnly()
+                        .end();
+
                 from("direct:rollback-exception")
                         .doTry()
                             .process(ex -> {
@@ -235,6 +256,34 @@ public class CatchRestoreProbe extends ProbeSupport {
         assertThat(out.isRollbackOnly())
                 .describedAs("and the abort stands")
                 .isTrue();
+    }
+
+    @Test
+    void routeStateSetByTheCatchBodySurvivesWhenTheSnapshotWasEmpty() {
+        var out = template.request("direct:body-marks-clean-snapshot", ex -> ex.getIn().setBody("in"));
+
+        assertThat(out.isRollbackOnly())
+                .describedAs("the restore block is guarded on the snapshot having had something in "
+                        + "it, so with a clean snapshot nothing is written back and the body's own "
+                        + "mark stands — the ordinary case, since a failure rarely carries marks")
+                .isTrue();
+    }
+
+    @Test
+    void routeStateSetByTheCatchBodyIsOverwrittenWhenTheSnapshotWasNot() {
+        var out = template.request("direct:body-marks-dirty-snapshot", ex -> ex.getIn().setBody("in"));
+
+        assertThat(out.isRollbackOnlyLast())
+                .describedAs("the snapshot carried rollbackOnlyLast, so the restore block runs")
+                .isTrue();
+        assertThat(out.isRollbackOnly())
+                .describedAs("and it writes all THREE fields back from the snapshot, so the body's "
+                        + "markRollbackOnly() is silently discarded")
+                .isFalse();
+        assertThat(out.isRouteStop())
+                .describedAs("as is its setRouteStop(true) — which is why a rethrow is the "
+                        + "dependable way to make a catch terminal")
+                .isFalse();
     }
 
     @Test

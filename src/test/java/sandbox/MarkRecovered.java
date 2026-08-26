@@ -43,14 +43,24 @@ import org.apache.camel.support.MessageHelper;
  * cleared both before the body runs and clears {@code redeliveryExhausted} again afterwards.
  * All measured in {@code CatchRestoreProbe}.
  * <p>
- * <b>And FIRST within the catch body, not last.</b> Two things run on whatever state the body has:
- * a route the body calls can only map its own failures on an unclaimed exchange, and a failure of
- * the body itself can only be mapped by a caller if it escapes unclaimed. Placing it last loses
- * both, and loses the reset too when the body throws. Note what it does not buy: a called
- * compensation route that <em>handles</em> its own failure still stops the caller, by the ordinary
- * ownership rule. Measured in {@code ContinuePlacementProbe}.
+ * <p>
+ * <b>Where it goes within the catch body is the developer's call, and it decides what it covers.</b>
+ * Steps before it run on the claimed exchange, so a route they call has its own error handling
+ * switched off — its clauses do not fire and its failure escapes raw; steps after it run clean and
+ * behave normally, and a throw ahead of it skips the processor entirely. First means the recovery's
+ * own failures are new, independent problems; last means they are part of the original one and are
+ * terminal. Measured in {@code ContinuePlacementProbe}.
+ * <p>
+ * Two things to expect when the recovery calls other routes. One using {@code handled(true)} stops
+ * the caller at the point of the call, including the rest of the catch body, and leaves its clause's
+ * body as the response. And a catch that only cleans up falls through into the rest of the route
+ * when it returns; a rethrow is the dependable way to make one terminal, because {@code .stop()} and
+ * {@code markRollbackOnly()} written inside the body are discarded whenever the failure arrived
+ * carrying route state of its own ({@code CatchRestoreProbe}).
  */
-public final class ContinueExchangeProcessor implements Processor {
+public final class MarkRecovered implements Processor {
+
+    public static final MarkRecovered INSTANCE = new MarkRecovered();
 
     @Override
     public void process(Exchange exchange) {

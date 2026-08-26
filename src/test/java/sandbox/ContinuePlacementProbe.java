@@ -9,7 +9,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Whether {@link ContinueExchangeProcessor} belongs first or last in a {@code doCatch} body.
+ * Whether {@link MarkRecovered} belongs first or last in a {@code doCatch} body.
  * <p>
  * Two things differ, and both are about the catch body itself rather than what comes after it: a
  * route the body calls can only map its own failures on an unclaimed exchange, and a failure of the
@@ -17,7 +17,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 public class ContinuePlacementProbe extends ProbeSupport {
 
-    private static final ContinueExchangeProcessor CONTINUE = new ContinueExchangeProcessor();
+    private static final MarkRecovered RECOVERED = MarkRecovered.INSTANCE;
 
     public static class CompensationFailed extends RuntimeException {
     }
@@ -46,7 +46,8 @@ public class ContinuePlacementProbe extends ProbeSupport {
             public void configure() {
                 onException(CompensationFailed.class)
                         .handled(true)
-                        .process(ex -> trace.add("compensator-clause-fired"));
+                        .process(ex -> trace.add("compensator-clause-fired"))
+                        .setBody(constant("COMP-BODY"));
 
                 from("direct:compensate")
                         .process(ex -> {
@@ -67,8 +68,20 @@ public class ContinuePlacementProbe extends ProbeSupport {
                         .doTry()
                             .to("direct:claiming-stage")
                         .doCatch(Boom.class)
-                            .process(CONTINUE)
+                            .process(RECOVERED)
                             .to("direct:compensate")
+                        .end()
+                        .process(ex -> trace.add("resumed"));
+
+                // Does a handling compensation route stop the rest of the CATCH BODY too, not
+                // just the step after end()?
+                from("direct:reset-first-with-more-after")
+                        .doTry()
+                            .to("direct:claiming-stage")
+                        .doCatch(Boom.class)
+                            .process(RECOVERED)
+                            .to("direct:compensate")
+                            .process(ex -> trace.add("still-inside-catch"))
                         .end()
                         .process(ex -> trace.add("resumed"));
 
@@ -77,7 +90,7 @@ public class ContinuePlacementProbe extends ProbeSupport {
                             .to("direct:claiming-stage")
                         .doCatch(Boom.class)
                             .to("direct:compensate")
-                            .process(CONTINUE)
+                            .process(RECOVERED)
                         .end()
                         .process(ex -> trace.add("resumed"));
 
@@ -94,7 +107,7 @@ public class ContinuePlacementProbe extends ProbeSupport {
                         .doTry()
                             .to("direct:claiming-stage")
                         .doCatch(Boom.class)
-                            .process(CONTINUE)
+                            .process(RECOVERED)
                             .process(ex -> {
                                 throw new LateBoom();
                             })
@@ -124,6 +137,24 @@ public class ContinuePlacementProbe extends ProbeSupport {
                         + "its error stops the caller either way, which the reset does not change")
                 .containsExactly("compensator-clause-fired");
         assertThat(out.getException()).isNull();
+    }
+
+    @Test
+    void aHandlingCompensationRouteEndsTheCatchBodyAndTheRouteWithItsOwnBody() {
+        var out = template.request("direct:reset-first-with-more-after",
+                ex -> ex.getIn().setBody("in"));
+
+        assertThat(trace)
+                .describedAs("resolved is a term in the pipeline's between-steps gate, and the "
+                        + "catch body is a pipeline too — so the step after the call does not run "
+                        + "either, not just the step after end()")
+                .containsExactly("compensator-clause-fired");
+        assertThat(out.getMessage().getBody(String.class))
+                .describedAs("and the response is whatever the compensation's clause set")
+                .isEqualTo("COMP-BODY");
+        assertThat(out.getException())
+                .describedAs("on a clean exchange, so at an edge this body actually ships")
+                .isNull();
     }
 
     @Test
