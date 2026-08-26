@@ -1,6 +1,7 @@
 package sandbox;
 
 import org.apache.camel.Exchange;
+import org.apache.camel.support.DefaultExchange;
 import org.apache.camel.builder.RouteBuilder;
 import org.junit.jupiter.api.Test;
 
@@ -107,5 +108,23 @@ public class ContinueExchangeProbe extends ProbeSupport {
                 .describedAs("resetting error state is not a second chance at the transaction — "
                         + "the rollback already happened and nothing here undoes it")
                 .isZero();
+    }
+
+    @Test
+    void itDoesNotRevokeARollbackDecision() {
+        var ex = new DefaultExchange(context);
+        ex.setRollbackOnly(true);
+        ex.getExchangeExtension().setFailureHandled(true);
+
+        CONTINUE.process(ex);
+
+        assertThat(ex.isRollbackOnly())
+                .describedAs("continued(true) clears the rollback mark and the guide flags that as "
+                        + "a hazard — an abort silently revoked by something that never mentions "
+                        + "transactions. Restoring mappability is no reason to repeat it.")
+                .isTrue();
+        assertThat(ex.getExchangeExtension().isFailureHandled())
+                .describedAs("while the claim, which is the whole point, is gone")
+                .isFalse();
     }
 }

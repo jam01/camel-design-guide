@@ -9,8 +9,9 @@ import org.apache.camel.support.MessageHelper;
  * that a {@code doTry}/{@code doCatch} can recover from a failure without the exchange staying
  * unmappable for the rest of its life.
  * <p>
- * The body mirrors {@code RedeliveryErrorHandler.RedeliveryTask.prepareExchangeForContinue} at
- * {@code camel-4.18.0}, plus {@code setErrorHandlerHandled(null)}. That last flag is not cleared
+ * It takes the flag-clearing half of
+ * {@code RedeliveryErrorHandler.RedeliveryTask.prepareExchangeForContinue} at
+ * {@code camel-4.18.0}, plus {@code setErrorHandlerHandled(null)}, and leaves the rest alone. That last flag is not cleared
  * there because it does not need to be: {@code continued(true)} is a clause, and a clause is only
  * reached on an exchange nothing has claimed, so it never inherits a verdict. A catch block does.
  * <p>
@@ -35,20 +36,22 @@ public final class ContinueExchangeProcessor implements Processor {
 
     @Override
     public void process(Exchange exchange) {
-        // as prepareExchangeForContinue
-        exchange.setException(null);
-        exchange.setRollbackOnly(false);
+        // The exception, EXCEPTION_CAUGHT and EXCEPTION_HANDLED are NOT touched here: CatchProcessor
+        // already sets all three when it catches, in the same shape SimpleTask's copy uses. What a
+        // catch does not do is clear the flags that gate future mapping, and that is all this adds.
+        exchange.getExchangeExtension().setFailureHandled(false);      // the claim
+        exchange.getExchangeExtension().setErrorHandlerHandled(null);  // and the verdict
+        exchange.getExchangeExtension().setRedeliveryExhausted(false);
+        exchange.setRouteStop(false);
+
         MessageHelper.resetStreamCache(exchange.getIn());
         exchange.getIn().removeHeader(Exchange.REDELIVERED);
         exchange.getIn().removeHeader(Exchange.REDELIVERY_COUNTER);
         exchange.getIn().removeHeader(Exchange.REDELIVERY_MAX_COUNTER);
-        exchange.getExchangeExtension().setFailureHandled(false);
-        // EXCEPTION_CAUGHT is kept on purpose, so the cause is still readable
 
-        // and the parts a clause never has to deal with
-        exchange.setRollbackOnlyLast(false);
-        exchange.setRouteStop(false);
-        exchange.getExchangeExtension().setRedeliveryExhausted(false);
-        exchange.getExchangeExtension().setErrorHandlerHandled(null);
+        // Deliberately NOT cleared: rollbackOnly and rollbackOnlyLast. continued(true) clears them,
+        // and that is exactly the hazard the guide flags — an abort decided earlier in the route
+        // silently revoked by something that never mentions transactions. Restoring mappability is
+        // no reason to overturn a rollback decision.
     }
 }
