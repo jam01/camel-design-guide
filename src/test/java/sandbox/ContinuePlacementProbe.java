@@ -37,6 +37,15 @@ public class ContinuePlacementProbe extends ProbeSupport {
                         .process(ex -> {
                             throw new Boom();
                         });
+
+                // Same, but only when asked, so the shape-three route has a success path to assert
+                // against — which is the only way to pin where its steps are parented.
+                from("direct:conditional-stage")
+                        .process(ex -> {
+                            if (ex.getIn().getHeader("fail") != null) {
+                                throw new Boom();
+                            }
+                        });
             }
         };
 
@@ -91,16 +100,18 @@ public class ContinuePlacementProbe extends ProbeSupport {
 
                 from("direct:shape-three")
                         .doTry()
-                            .to("direct:claiming-stage")
+                            .to("direct:conditional-stage")
                         .doCatch(Boom.class)
                             .doTry()
                                 .to("direct:compensate")
                             .doCatch(CompensationFailed.class)
                                 .process(ex -> trace.add("inner-catch"))
-                            .end()
+                            .endDoTry()   // closes the nested doCatch
+                            .end()        // closes the nested doTry, back in the outer catch
                             .process(RECOVERED)
                             .process(ex -> trace.add("reset-reached"))
                         .end()
+                        .end()        // an outer block that contains a nested one needs two
                         .process(ex -> {
                             throw new LateBoom();
                         });
@@ -178,8 +189,22 @@ public class ContinuePlacementProbe extends ProbeSupport {
     }
 
     @Test
-    void aNestedGuardLetsTheCatchBodyCarryOnToAResetPlacedAfterIt() {
+    void theStepAfterTheOuterEndIsParentedToTheRouteNotTheCatch() {
         var out = template.request("direct:outer-shape-three", ex -> ex.getIn().setBody("in"));
+
+        assertThat(trace)
+                .describedAs("on the success path the catch is skipped, so the throw after the "
+                        + "outer end() only runs if it is parented to the route. Asserting the "
+                        + "failure path alone cannot tell the two parentings apart, because "
+                        + "everything in a catch body runs on the failure path either way")
+                .containsExactly("caller-mapped-late");
+        assertThat(out.getMessage().getBody(String.class)).isEqualTo("MAPPED-LATE");
+    }
+
+    @Test
+    void aNestedGuardLetsTheCatchBodyCarryOnToAResetPlacedAfterIt() {
+        var out = template.request("direct:outer-shape-three",
+                ex -> ex.getIn().setHeader("fail", "y"));
 
         assertThat(trace)
                 .describedAs("the compensation route's own clause cannot fire on a claimed "
