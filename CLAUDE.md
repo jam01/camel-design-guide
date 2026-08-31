@@ -166,6 +166,12 @@ re-derive these; do challenge them if something contradicts them.
 | At an HTTP edge the status survives a failed exchange and the body does not — measured end to end: `409` arrives, body is empty, `Content-Type` forced to `text/plain`. With `handled(true)` the same body arrives intact. With `muteException=false` the body is the **stack trace**, never yours. | `HttpConsumerProbe` |
 | Backpressure at a full `seda:` queue, all three measured: default **throws** `IllegalStateException` at the producer; `blockWhenFull` **parks** the producer until space appears (no timeout); `discardWhenFull` **drops silently**. | `BackpressureProbe` |
 | A task rejected by a `.threads()` pool runs on the **caller's thread** — Camel's default `rejectedPolicy` is `CallerRuns`, so the hop silently does not happen. | `BackpressureProbe` |
+| **There is no blocking rejection policy.** `ThreadPoolRejectedPolicy` has exactly two values at 4.18.0, `Abort` and `CallerRuns` — parking the producer until a thread frees up is available at a `seda:` queue (`blockWhenFull`) and nowhere at a thread pool. Advice to configure a `Block` policy has nothing to configure. | `RejectionPolicyProbe`; `ThreadPoolRejectedPolicy` |
+| **An `Abort` pool rejection is a mappable failure, not a throw at the sender.** Camel's Abort handler checks for `Rejectable`, and `ThreadsProcessor.ProcessCall.reject` *sets* a `RejectedExecutionException` on the exchange and completes the callback — so the route's own clause maps it and an edge can answer 429. Also measured: naming a profile on `.threads().executorService("x")` carries that profile's policy across, because `ThreadsReifier.resolveRejectedPolicy` looks the ref up as a **profile**. A ref naming a bean instead falls back to `callerRunsWhenRejected`, default true. | `RejectionPolicyProbe`; `ThreadsProcessor`, `ThreadPoolRejectedPolicy.asRejectedExecutionHandler`, `ThreadsReifier:108-118` |
+| **Each `.threads()` without an `executorService` builds its own pool** from the default profile — `ThreadsReifier` constructs a fresh `ThreadPoolProfile` and calls `manager.newThreadPool` per definition. Five of them is five pools nobody sized. | `ThreadsReifier:60-74` |
+| **A non-blocking producer does release the caller's thread**: an `AsyncProcessor` returning `false` leaves the step after it running on the thread that completed the call, not the one that made it. This is the premise the "don't hop before an async producer" rule rests on, and it holds. | `AsyncContinuationProbe` |
+| **Inside `.circuitBreaker()` it does not.** `ResilienceProcessor.processTask` runs the block through the synchronous `processor.process(copy)` and awaits it, so the caller's thread is parked for the whole call and resumes the route itself after `end()`. A permit and a thread are therefore held over the same interval, however non-blocking the component inside the block is — which kills the idea of sizing a bulkhead by dependency latency independently of thread count. | `AsyncContinuationProbe`; `ResilienceProcessor:564-593` |
+| **Producer class hierarchy does not tell you whether a component blocks.** `camel-http`, `sql` and `aws2-s3` producers extend `DefaultProducer` (synchronous by construction), but `file` extends `DefaultAsyncProducer` and still blocks: it does the work and `return true`. The test is whether `process(exchange, callback)` returns **false**, not what it extends. | `HttpProducer`, `SqlProducer`, `AWS2S3Producer`, `GenericFileProducer:64-73` |
 | `.circuitBreaker()` with `onFallback` **claims** the failure (a builder clause never sees it) but **routing resumes after `end()`** — it owns like a callee and returns like a `doCatch`. | `CircuitBreakerProbe` |
 | The breaker is a **semaphore, not a pool**: by default the call runs on the caller's thread, no hop. Enabling `timeoutEnabled` brings Resilience4j's TimeLimiter, which **does** hop — a config flag that reads like a timeout is a thread boundary. | `CircuitBreakerProbe` |
 | **`timeoutEnabled` inside `.transacted()` silently splits atomicity.** Camel suppresses `.threads()` for a transacted exchange; nothing suppresses Resilience4j's hop. Measured: the write inside the breaker committed on another thread while the write before it rolled back. | `CircuitBreakerProbe` |
@@ -238,13 +244,32 @@ Fix or flag these before leaning on them.
 ## Incoming source material
 
 `~/.claude/uploads/…/b1d2f394-camelthreadsandbulkheads.md` — "Threads, Pools and Bulkheads in
-Camel", written before this project and **partially validated** (2026-08-24). Everything checkable
-in it held up: the 10/20/1000 defaults, CallerRuns, the seda defaults, and platform-http-vertx's
-`executeBlocking`. Its one real gap is that `.threads()` is suppressed inside a transaction, which
-changes its "When to hop" advice. Since probed: `timeoutEnabled` does reintroduce a thread hop (**confirmed**), and
-`bulkheadMaxWaitDuration` defaults to **0**, not to queueing (**the doc is wrong there**). Still
-unverified in it: the blocking/non-blocking component lists and the CAMEL issue number. Its sizing formulas are arithmetic, not Camel behaviour — mark them as reasoning, not
-measurement, if they go in the guide.
+Camel", written before this project and now **fully reviewed** (2026-08-31; the copy at
+`/tmp/camel-threads-and-bulkheads.md` is byte-identical, so there is only one version of it).
+
+Confirmed: the 10/20/1000 defaults, CallerRuns, the seda defaults, platform-http-vertx's
+`executeBlocking`, the pool-per-`.threads()` claim, `poolSize = maxPoolSize` (Camel builds a
+bounded `LinkedBlockingQueue`, so a JDK pool really does fill the queue before growing), the
+blocking-component list (`http`, `sql`, `aws2-s3` and `file` all block), and `timeoutEnabled`
+reintroducing a hop.
+
+Four things in it are **wrong or misleading** and must not be carried into the guide:
+
+- **`Block` is not a rejection policy.** Four passages configure or discuss one. The enum has only
+  `Abort` and `CallerRuns`; the parked-producer shape it describes belongs to `seda:blockWhenFull`.
+- **Bulkhead permits are not decoupled from threads.** "Fifty permits and roughly zero threads is
+  normal" is false inside Camel's `.circuitBreaker()`, which runs its block synchronously — so the
+  whole "bulkheads for non-blocking calls" premise inverts. Wrapping a non-blocking call in a
+  breaker is itself the thing that makes it hold a thread.
+- **`bulkheadMaxWaitDuration` defaults to 0, not to queueing.**
+- **CAMEL-20480 is not the ticket for `executeBlocking`.** It is *Won't Fix*, filed 2024, about a
+  blocked **worker** thread under jbang debug — it presupposes the offload it is cited for. Cite
+  `VertxPlatformHttpConsumer` instead.
+
+Its remaining gaps: `.threads()` is suppressed inside a transaction (which changes its "When to
+hop" advice), and the streaming section's claim that a body handed to `seda:` closes underneath the
+source route is **not measured**. Its sizing formulas are arithmetic, not Camel behaviour — mark
+them as reasoning, not measurement, if they go in the guide.
 
 ## The commit-on-failure bug, fully characterised (2026-08-25)
 
@@ -422,6 +447,9 @@ Known and repeatedly reported; treated as by design in the general case.
   routing at the next step, so nothing throws and no clause fires.
 - Does the application's per-retry-a-fresh-transaction nesting change what a clause sees on the second
   attempt? Not reproducible here; needs a probe against `camel-jta`.
+- **Does a streaming body handed to `seda:` really close underneath the source route?** The source
+  doc's streaming section rests on it, and it is reachable in-JVM: a `platform-http` consumer, a
+  `seda:` handoff, and a read of the body after the source route has completed. Not measured.
 - Is there a hook that fires on **failure including a mapped one**? `onFailureOnly` is out (it reads
   `isFailed()`), and `onCompleteOnly` fires on rollbacks. Today the only reliable answer is to do
   compensation inside the clause itself, before `markRollbackOnly()`.
