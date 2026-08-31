@@ -106,8 +106,9 @@ where a stage split out for entirely good reasons turns out to share a transacti
 its caller regardless.
 
 It can also do the opposite, and worse. Moving a step into its own untransacted route
-moves its failures into a *different error handler* — one that will claim and clear them
-before the caller's transaction boundary ever learns anything went wrong. That is the
+moves its failures into a *different error handler* — one that claims them always, and
+clears the exception too if it has a clause that handles, before the caller's transaction
+boundary ever learns anything went wrong. That is the
 exact mechanism of the commit-on-failure described in
 [part three](#part-three--mechanism), and this refactor is what produces it.
 
@@ -133,9 +134,9 @@ acknowledged decides whether the broker is listening at all:
 | Consumer | What the route does | Deliveries | Ends up |
 |---|---|---|---|
 | plain — the default | leaves the failure live | **1** | acknowledged and **lost** [probe](src/test/java/sandbox/BrokerProbe.java "onAPlainConsumer_anUnhandledFailureIsAcknowledgedAndLost") |
-| `transacted=true` | leaves the failure live | **3** | dead-letter queue [probe](src/test/java/sandbox/BrokerProbe.java "onATransactedConsumer_anUnhandledFailureIsRedeliveredThenDeadLettered") |
+| `transacted=true` | leaves the failure live | **the broker's redelivery policy** | dead-letter queue [probe](src/test/java/sandbox/BrokerProbe.java "onATransactedConsumer_anUnhandledFailureIsRedeliveredThenDeadLettered") |
 | `transacted=true` | `handled(true)` | **1** | acknowledged and dropped, deliberately [probe](src/test/java/sandbox/BrokerProbe.java "mappingTheFailure_acknowledgesAndDropsTheMessage") |
-| `transacted=true` | … + `markRollbackOnly()` | **3** | dead-letter queue [probe](src/test/java/sandbox/BrokerProbe.java "addingTheRollbackMark_bringsTheRedeliveryBack") |
+| `transacted=true` | … + `markRollbackOnly()` | **the broker's redelivery policy** | dead-letter queue [probe](src/test/java/sandbox/BrokerProbe.java "addingTheRollbackMark_bringsTheRedeliveryBack") |
 
 `seda:` is on the fire-and-forget side of that list but answers differently, and worse.
 Start with the part that is easy to get wrong: **a send to `seda:` is not
@@ -185,7 +186,7 @@ both a mapped outcome and a redelivery.
 
 Putting an error handler on a reusable stage is a **declaration**, not an implementation
 detail. It claims the right to interrupt the consumer: whatever that stage decides the
-failure becomes is what every caller gets, and no caller has a say after the fact.
+failure becomes is what every caller gets, and no caller's clause has a say after the fact.
 
 So a shared stage should carry *clauses* only when it actually wants that power — when
 it can turn a failure into an outcome that is right for every caller it has. Declining
@@ -241,8 +242,9 @@ sometimes. A throw there never reaches *this* route's clauses — the block has 
 handler — and if **nothing had claimed the exchange** it leaves unclaimed, so the first
 handler to see it is the caller's, and that one maps it normally.
 [probe](src/test/java/sandbox/CatchEscapeProbe.java "anUnclaimedRethrowFromACatchIsMappedByTheCaller")
-Under a shared base class the caller carries the same clauses, which makes the result
-indistinguishable from the route having mapped itself.
+Under a shared base `RouteBuilder` that registers clauses in `configure()`, the caller
+carries those same clauses, which makes the result indistinguishable from the route having
+mapped itself.
 
 ```java
 from("direct:fetch-thing")
@@ -268,13 +270,14 @@ threw, and clears any rollback mark on its way through.
 `doTry`.
 
 > [!WARNING]
-> **And it stops working when someone extracts a route**
+> **And handing it onward stops working the moment the callee stops declining**
 >
-> That only works because nothing claimed the failure. Replace the step inside the
-> `doTry` with a call to another route, and that route's handler claims it — at which
-> point every handler afterwards treats the exchange as finished, the caller's clause is
-> skipped, and the identical rethrow reaches nobody. The client gets an empty
-> `text/plain` instead of the mapped body.
+> The route above is already an extracted one — what makes it work is the
+> `noErrorHandler()` on it. Take that line away, or call any ordinary route that never
+> had one, and the callee claims the failure. From that point every handler treats the
+> exchange as finished, so a rethrow from inside the `doCatch` — the same rethrow, from
+> the same line — now reaches nobody, because the caller's clause is skipped too. The
+> client gets an empty `text/plain` instead of the mapped body.
 > [probe](src/test/java/sandbox/CatchRethrowProbe.java "norDoesTheCallersClauseMapAThrowAfterAClaimedCallee")
 >
 > Nothing at the call site changed. The thing being called did. This is
@@ -289,14 +292,17 @@ threw, and clears any rollback mark on its way through.
 > end of the route, a later `doTry`/`doCatch` still catches, `setHeader` and `setBody`
 > still land, and the exchange still ends clean if nothing is left thrown.
 > [probe](src/test/java/sandbox/CatchRethrowProbe.java "aClaimedExchangeStillRoutes_catchesAndSetsHeaders_itOnlyLosesMapping")
-> Exactly one capability is gone — being mapped by a clause — and it is gone for the rest
-> of the exchange's life. Because `direct:` keeps the same exchange, that includes the
+> Exactly one capability is gone — **any `onException` clause firing for it** — and it is
+> gone for the rest of the exchange's life. Not only clauses that map a response: a clause
+> that just logs, or compensates, is equally never dispatched. Because `direct:` keeps the same exchange, that includes the
 > caller's own later steps, not just the route where the claim happened.
 >
 > So the failure mode is a route that runs to completion and returns a response, in which
-> a *thrown* domain exception has quietly stopped becoming a status code. You get a 500
-> where you meant a 409, on a route where everything else works, and no test that asserts
-> only on the happy path will see it.
+> a *thrown* domain exception has quietly stopped becoming a status code: the clause that
+> would have turned `AlreadyExists` into a 409 never runs, so the exception reaches the
+> edge unmapped and the edge has only its default 500 to offer. You get a 500 where you
+> meant a 409, on a route where everything else works, and no test that asserts only on
+> the happy path will see it.
 
 > [!WARNING]
 > **Not a reachable configuration**
@@ -558,7 +564,7 @@ independent:
 | Question | The tool | What it costs |
 |---|---|---|
 | Am I about to block a thread I do not own? | `.threads()`, a queue endpoint | A real hop — enqueue, wakeup, a cold cache |
-| How much work do I admit to this dependency? | A pool's bounds, or a bulkhead | A ceiling, and something to say when it is reached |
+| How much work do I admit to this dependency? | A thread pool's bounds, or a bulkhead | A ceiling, and something to say when it is reached |
 
 Hopping does not bound anything, and bounding does not move the work. Most confused
 capacity configuration is one of those two reached for when the other was wanted.
@@ -599,8 +605,9 @@ it runs on the thread that received the response, not on the one that made the c
 [probe](src/test/java/sandbox/AsyncContinuationProbe.java "anAsyncProducerReleasesTheCallersThread_andTheRestOfTheRouteRunsOnTheResponseThread")
 So a route that queries a database and then calls a non-blocking HTTP service needs no hop
 — the async producer releases the thread by itself. Reverse the two and you must hop,
-because the database call would otherwise land on an event loop. The same two components,
-the same route, opposite answers.
+because the database call would then run on whatever thread the HTTP response arrived on
+— for `vertx-http`, an event loop. The same two components, the same route, opposite
+answers.
 
 > [!NOTE]
 > **Verify rather than trust any list, including the one below**
@@ -653,11 +660,11 @@ none, and falls back to `callerRunsWhenRejected`, which defaults to true.
 .threads().executorService("db")   // the profile above, Abort and all
 ```
 
-## Pool or bulkhead?
+## Thread pool or bulkhead?
 
 They overlap more than their names suggest, and stacking them is usually a mistake.
 
-**If you are blocking, a well-configured pool already is a bulkhead** — bounded
+**If you are blocking, a well-configured thread pool already is a bulkhead** — bounded
 concurrency, a bounded queue, and a rejection you can catch. A second ceiling in front of
 it adds a number to tune and no isolation you did not have. *Reasoning, not measured.*
 
@@ -765,6 +772,21 @@ protect the event loop hands the work straight back to it, and every other conne
 stalls. **The rejection policy belongs to the thread doing the submitting, not to the
 source of the work.**
 
+> [!NOTE]
+> **When are you actually on an event loop?**
+>
+> Not at the front door. A route behind `platform-http` runs on a Vert.x *worker* thread,
+> never the event loop, because the consumer wraps routing in `executeBlocking`.
+> [probe](src/test/java/sandbox/HttpConsumerProbe.java "aRouteRunsOnAVertxWorkerThread_notTheEventLoop")
+> You get onto an event loop by *continuation*: after a non-blocking producer completes,
+> the rest of the route runs on the thread that received the response
+> [probe](src/test/java/sandbox/AsyncContinuationProbe.java "anAsyncProducerReleasesTheCallersThread_andTheRestOfTheRouteRunsOnTheResponseThread"),
+> and for `vertx-http` or `netty-http` that thread is an event loop.
+>
+> So the event-loop case is real, but it is reached from the middle of a route rather than
+> at its entry — which is also the one place `CallerRuns` does the most damage, because the
+> thread it hands the work back to is the one thread that must not block.
+
 The choice is between exactly two policies, because those are the only two there are.
 **Camel has no blocking rejection policy** — `Abort` and `CallerRuns` are the whole enum.
 [probe](src/test/java/sandbox/RejectionPolicyProbe.java "thereIsNoBlockingRejectionPolicy")
@@ -800,9 +822,10 @@ move the boundary rather than configure it.
 > [!WARNING]
 > **Retry and a circuit breaker do not compose the way they read**
 >
-> A failure inside `.circuitBreaker()` is **not redelivered**. The identical failure under
-> the identical error handler was retried three times in an ordinary route and attempted
-> *once* inside the block
+> A failure inside `.circuitBreaker()` is **not redelivered**. Measured with two routes in
+> one test — same exception, same error handler, the only difference being that one body
+> sits inside a `.circuitBreaker()`: the plain route retried three times, the wrapped one
+> attempted the call *once*
 > [probe](src/test/java/sandbox/CircuitBreakerRetryProbe.java "redeliveryDoesNotReEnterTheBreaker_soRetryQuietlyStopsAtItsEdge")
 > — the breaker sets the exception on the exchange and returns rather than throwing
 > through the channel, so redelivery never re-enters it. `maximumRedeliveries` applies
@@ -823,7 +846,8 @@ move the boundary rather than configure it.
 > [probe](src/test/java/sandbox/CircuitBreakerRetryProbe.java "aFallbackStopsRetryBeforeItStarts")
 > The fallback clears the exception, so the error handler sees a success and has nothing
 > to retry. This is the second time the same trap appears: giving an `onException` clause
-> a body disables its retries, and giving a breaker a fallback disables retries around it.
+> a body disables its retries — [why](#where-retry-is-configured) — and giving a breaker a
+> fallback disables retries around it.
 > Neither construct mentions retry.
 
 One consequence follows from the route-versus-block rule rather than from its own probe:
@@ -871,8 +895,10 @@ rejecting it.
 ## When there is no pool to bound
 
 A non-blocking producer gives the thread back, so there is no pool to size and a semaphore
-is the only bound left. Camel's bulkhead is off by default, allows 25 concurrent calls
-when on, and waits *zero* for a permit, so a full one sheds immediately into `onFallback`
+is the only bound left. That semaphore is Resilience4j's bulkhead, which Camel exposes as
+a setting *on the breaker block* — `.circuitBreaker().resilience4jConfiguration()
+.bulkheadEnabled(true)` — rather than as a construct of its own. It is off by default,
+allows 25 concurrent calls when on, and waits *zero* for a permit, so a full one sheds immediately into `onFallback`
 rather than queueing.
 [probe](src/test/java/sandbox/CircuitBreakerProbe.java "aFullBulkheadRejectsImmediatelyIntoTheFallback")
 
