@@ -1,9 +1,11 @@
-# camel-sandbox
+# camel-design-guide
 
-A scratch project for settling Apache Camel semantics **by experiment**, and the working space for
-an application design guide built on what those experiments show.
+A design guide for Apache Camel applications, and the probe harness that settles its claims **by
+experiment**. The guide is the deliverable; the probes are the evidence for it.
 
-Nothing here ships. Break it freely.
+**This repository is public.** The probes are still a scratch space — break them freely, they exist
+to be rewritten — but `guide.md`, `README.md` and `METHOD.md` are published work that people read
+and link to. Treat edits to those as edits to something shipped.
 
 ## The job
 
