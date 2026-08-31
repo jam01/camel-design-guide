@@ -11,8 +11,8 @@ import java.util.function.Consumer;
 /**
  * {@code PROPAGATION_REQUIRED} over a real JTA transaction manager: a faithful copy of Quarkus's
  * {@code TransactionalJtaTransactionPolicy.runWithTransaction} — begin if this is the outermost,
- * run, roll back and rethrow on any throwable, otherwise commit. Reproducing the application's policy
- * rather than inventing one is what lets these probes say anything about the application.
+ * run, roll back and rethrow on any throwable, otherwise commit. Reproducing that policy rather
+ * than inventing one is what lets these probes say anything about a real JTA deployment.
  * <p>
  * Shared on purpose. Three probes each kept their own copy, and when one was found to leak a
  * transaction on a setup failure, the fault had already been copied twice — because the part worth

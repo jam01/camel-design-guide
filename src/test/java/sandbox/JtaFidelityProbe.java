@@ -44,8 +44,8 @@ public class JtaFidelityProbe extends ProbeSupport {
     /**
      * A faithful copy of Quarkus's {@code TransactionalJtaTransactionPolicy.runWithTransaction} —
      * begin if this is the outermost, run, roll back and rethrow on any throwable, otherwise
-     * commit. The application uses that class, so reproducing it here rather than inventing a policy
-     * is what makes this probe say anything about the application.
+     * commit. A Quarkus application uses that class, so reproducing it here rather than inventing
+     * a policy is what makes this probe say anything about a real JTA deployment.
      */
 
 

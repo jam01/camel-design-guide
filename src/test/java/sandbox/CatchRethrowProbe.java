@@ -111,7 +111,7 @@ public class CatchRethrowProbe extends ProbeSupport {
 
                 from("direct:noop").log("ok");
 
-                // The case the application actually relies on: the failure is raised inline, so nothing
+                // The case a real application relies on: the failure is raised inline, so nothing
                 // claims it, and the catch block raises a domain exception in its place.
                 // The untested cell: a caller, whose callee's doCatch caught a CLAIMED failure and then
                 // raised its own. Distinct from direct:calls-the-rethrower, where the failure was inline.

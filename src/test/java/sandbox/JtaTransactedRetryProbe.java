@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * {@link TransactedRetryProbe} answers the neighbouring question under Spring (N attempts, one
  * transaction). This one is about <em>whether the attempts happen at all</em>, and it uses the JTA
- * policy because that is the one the application runs.
+ * policy because that is the one a Quarkus application runs.
  */
 public class JtaTransactedRetryProbe extends ProbeSupport {
 
@@ -133,7 +133,7 @@ public class JtaTransactedRetryProbe extends ProbeSupport {
                 .containsExactly("ROLLED_BACK", "ROLLED_BACK", "ROLLED_BACK");
         // Deliberately no assertion on rows(): as in JtaFidelityProbe, the H2 DataSource here is not
         // enlisted in the JTA transaction, so what this harness measures is Camel's commit/rollback
-        // decision and Narayana's execution of it, not the data. The application's datasource is enlisted.
+        // decision and Narayana's execution of it, not the data. A real datasource would be enlisted.
     }
 
     @Test

@@ -82,14 +82,15 @@ running `mvn test` without `clean` can leave the old class file in place — `No
 on `Outer$1` at runtime. If that lands inside a transaction policy, the transaction is left
 associated with the thread and the *next* test fails with Narayana's ARJUNA016051, so one stale
 file produces failures in tests that passed minutes earlier. `mvn clean test` fixes it with no code
-change. (Reported by an independent reviewer; the same class of trap as the stale reports below.)
+change. (Reported independently; the same class of trap as the stale reports below.)
 
 **Never judge a run by grepping for "FAIL".** A compile error leaves the previous
 `target/surefire-reports/*.txt` in place, so a grep reads stale green results from the last
 successful build. This happened once and hid a broken `@Override` for several turns. Check
 `echo $?` after `mvn clean test`, or look for `BUILD SUCCESS`.
 
-Camel is pinned to **4.18.0** in `pom.xml`, matching the application. Keep it that way; findings that
+Camel is pinned to **4.18.0** in `pom.xml`, matching the application this came from. Keep it that
+way; findings that
 don't transfer are worse than no findings.
 
 ## How to work here
@@ -105,7 +106,8 @@ before it was set, and dominated the whole suite. It affects teardown only, neve
 
 **`NarayanaRequiredPolicy` is the single JTA policy — do not copy it into a probe.** It is a
 faithful copy of Quarkus's `TransactionalJtaTransactionPolicy`, which is what makes the JTA probes
-say anything about the application, and it takes optional sinks for the completion outcome and the
+say anything about a real JTA deployment, and it takes optional sinks for the completion outcome
+and the
 error-handler frames. Three probes previously kept private copies; when one was found to leak a
 transaction on a setup failure, the fault had already been copied twice — the fidelity everyone
 wanted came bundled with scaffolding nobody re-read. Shared helpers are usually the wrong instinct
@@ -127,13 +129,13 @@ was mostly 404s.
 
 ## What is already established
 
-Verified by probe here, by source reading at 4.18.0, or by tests against a real deployment. Do not
+Verified by probe here, by source reading at 4.18.0, or against a real deployment. Do not
 re-derive these; do challenge them if something contradicts them.
 
 | Finding | How it was established |
 |---|---|
 | Two independent gates: routing continues on `isFailed \|\| isRollbackOnly \|\| isRollbackOnlyLast \|\| errorHandlerHandled`; the transaction rolls back on `exception != null \|\| isRollbackOnly`. `errorHandlerHandled` is in the first and not the second — that asymmetry is the whole bug. | `PipelineHelper.continueProcessing`, `TransactionErrorHandler` |
-| `handled(true)` alone returns a mapped response **and commits** the writes made before the failure. Adding `.markRollbackOnly()` last keeps the response and rolls back. | `TransactionProbe` here, plus the application's own regression test |
+| `handled(true)` alone returns a mapped response **and commits** the writes made before the failure. Adding `.markRollbackOnly()` last keeps the response and rolls back. | `TransactionProbe` here, plus a regression test against a real deployment |
 | A callee that owns the error decides the outcome; the caller's clause never fires and the caller does **not** resume after the call. | `OwnershipProbe` here |
 | The "claimed" stamp is **not** caused by a clause. `setFailureHandled` is the first statement in `prepareExchangeAfterFailure`, before any handled/continue branching, so **a route declaring nothing at all claims its failures too** — claimed and unhandled at once, exception still live, caller's clause skipped. Clauses only decide what the claim produces. `noErrorHandler()` is genuinely the only way to decline: it is a pass-through that never reaches that code. | `DefaultHandlerProbe`; `RedeliveryErrorHandler.prepareExchangeAfterFailure`; `ExchangeHelper.setFailureHandled` |
 | The default error handler also owns **redelivery** with no clauses registered: a callee under `defaultErrorHandler().maximumRedeliveries(2)` retries twice before the caller learns anything. Out of the box the policy is 0 redeliveries, so it looks inert until someone configures it. | `DefaultHandlerProbe` |
@@ -155,7 +157,7 @@ re-derive these; do challenge them if something contradicts them.
 | **`shouldWrapInErrorHandler` excludes the `doTry`/`doCatch`/`doFinally` DEFINITIONS themselves, not only their children** (`definition instanceof TryDefinition` is the first branch). So a failure escaping a `doTry` block never reaches **its own route's** clauses — only a calling route can map it. This is why `CatchEscapeProbe`'s finding is phrased as *the caller's* clause. | `ProcessorDefinitionHelper.shouldWrapInErrorHandler`; `ContinuePlacementProbe` |
 | **A clause's continue clearing is SPLIT around its own body.** Before the body (`:1454-1462`, the `handleOrContinue` block): rollback mark, redelivery headers, `redeliveryExhausted`. After it, in the failure processor's done callback (`afp.process(exchange, sync -> prepareExchangeAfterFailure(...))` at `:1530-1534`): the claim is *set* at `:1615` and then cleared at `:1249`, and the exception cleared. So a clause body **always runs unclaimed** — not because continue cleared anything, but because nothing has claimed yet. That is also why `continued(true)` stacks. | `ContinuedProbe`; `RedeliveryErrorHandler` |
 | **A throw inside a `continued(true)` clause body cancels the continue entirely.** `FatalFallbackErrorHandler:133,143` shadows `EXCEPTION_CAUGHT` with the new exception and pins `errorHandlerHandled(false)`; `prepareExchangeAfterFailure`'s `alreadySet` branch at `:1617-1630` then restores it and **returns before `shouldContinue` is consulted**. The route does not resume and the compensation's exception replaces the original — identical to `handled(true)`, no special protection. This is a *reachable* instance of the `alreadySet` short-circuit, but not the candidate ticket's reproducer: here the pin comes from the same failure's own clause failing, which is defensible. | `ContinuedProbe`; `FatalFallbackErrorHandler` |
-| **A `doTry` nested inside a `doCatch` needs `.endDoTry()` then `.end()`, and the outer block then needs TWO `.end()` calls.** Getting it wrong is silent — no build or run error. One `.end()` after the nested `doCatch` closes only that catch, leaving you inside the nested try; the next step joins that block and the following `.end()` closes the nested try instead of the outer one, reparenting the rest into the outer catch body. It cannot be caught by asserting the failure path, because everything in a catch body runs there under either parenting; only a **success**-path assertion distinguishes them. Reported by an independent reviewer (nine failing tests, none near the cause); reproduced here, where it had silently affected this probe's own route. | `ContinuePlacementProbe` |
+| **A `doTry` nested inside a `doCatch` needs `.endDoTry()` then `.end()`, and the outer block then needs TWO `.end()` calls.** Getting it wrong is silent — no build or run error. One `.end()` after the nested `doCatch` closes only that catch, leaving you inside the nested try; the next step joins that block and the following `.end()` closes the nested try instead of the outer one, reparenting the rest into the outer catch body. It cannot be caught by asserting the failure path, because everything in a catch body runs there under either parenting; only a **success**-path assertion distinguishes them. Reported independently (nine failing tests, none near the cause); reproduced here, where it had silently affected this probe's own route. | `ContinuePlacementProbe` |
 | **Placement within the catch body is a developer choice and decides coverage.** Measured: with the reset first, a compensation route called from the body has its own clause fire, and a throw from the body escapes unclaimed for a *calling* route to map; with it last, that clause never fires, the compensation's failure escapes unmapped, and the reset itself never runs. Four shapes, all measured and now in the guide: ignore (alone or first); compensate-and-give-up (last); compensate-and-handle-by-hand (last + nested `doTry`/`doCatch`, and routing does carry on to a reset placed after the nested block); compensate-via-a-route-whose-handlers-must-fire (first + nested guard). Only the fourth is impossible in the other position. | `ContinuePlacementProbe` |
 | **The two flags gate different machinery.** *Claimed* (`failureHandled`) gates the **error handler** — `isDone` at `:309-311` treats a claimed exchange as finished, so no clause is dispatched. *Resolved* (`errorHandlerHandled`) is a term in the **pipeline's** between-steps gate (`PipelineHelper:41`), so it stops the route advancing. That is why they poison differently: claimed suppresses mapping, resolved suppresses routing. | `RedeliveryErrorHandler`, `PipelineHelper` |
 | **A compensation route that `handled(true)` ends the caller from the point of the call.** With the reset first its clause does fire — but `handled(true)` sets *resolved*, which the pipeline gate reads, so the step after the call **inside the catch body** does not run either, nor the step after `end()`. The exchange ends clean carrying that clause's body, so at an edge the compensation's error body ships as the response. Consequence: a catch body may only call compensation routes that do **not** handle (no clauses, `noErrorHandler()`, `handled(false)`, a rethrow, or `continued(true)` are all fine) — and that is a property of the callee the caller cannot defend against. | `ContinuePlacementProbe` |
@@ -222,25 +224,27 @@ Fix or flag these before leaning on them.
 1. **Transaction manager differs — now diffed AND probed, and the difference is bigger than the
    rollback condition.** See `JtaFidelityProbe` and the CONTRADICTION note below before trusting
    anything on this page about `handled(true)` under JTA. This sandbox uses
-   Spring's `DataSourceTransactionManager` via `camel-spring`; the application uses `camel-jta` with
+   Spring's `DataSourceTransactionManager` via `camel-spring`; the target application uses
+   `camel-jta` with
    Narayana. Two differences that matter:
 
    - **Redelivery nests the other way round.** Spring's `TransactionErrorHandler` *is* a
-     `RedeliveryErrorHandler`, so retries happen **inside** one transaction. The application's
+     `RedeliveryErrorHandler`, so retries happen **inside** one transaction. The target's
      `JtaTransactionErrorHandler` is a `RedeliveryErrorHandler` that *wraps* an inner
      `TransactionErrorHandler`, so **each retry gets a fresh transaction**. Camel's own javadoc
      gives the reason: "every error breaks the current transaction". Any finding about retry and
-     transaction interaction must be stated for the application's nesting, not this one's.
+     transaction interaction must be stated for that nesting, not this one's.
    - **`isRollbackOnlyLast()` is in Spring's rollback condition and absent from JTA's.** Spring
      rolls back on `exception != null || isRollbackOnly() || isRollbackOnlyLast()`; JTA on
      `exception != null || isRollbackOnly()`. So `markRollbackOnlyLast()` after a `handled(true)`
      (which cleared the exception) is expected to **commit** under Narayana while it rolls back
      here. `NestedTransactionProbe#requiresNewPlusRollbackOnlyLast_isolatesTheCalleeProperly`
-     carries this caveat and should not be quoted for the application without a test there.
+     carries this caveat and should not be quoted for a JTA deployment without a test there.
 
    Gate 2 as stated in the table above — `exception != null || isRollbackOnly` — is the **JTA**
-   condition, so it is right for the application; this sandbox is merely more eager to roll back.
-   Note also that the class the application actually instantiates is `JtaTransactionErrorHandler`, not
+   condition, so it is the right one for a JTA deployment; this sandbox is merely more eager to roll
+   back.
+   Note also that the class actually instantiated there is `JtaTransactionErrorHandler`, not
    the `TransactionErrorHandler` sitting beside it in the same package.
 2. ~~**No HTTP consumer is wired.**~~ **Closed.** `camel-platform-http-vertx` is now a test
    dependency and `HttpConsumerProbe` binds a real port in-JVM (no container). The status/body
@@ -298,17 +302,17 @@ Row 1 differs because the handlers are wired opposite ways. Spring's `Transactio
 `TransactionErrorHandler`, so the transaction completes first (`JtaFidelityProbe`:
 `["ROLLED_BACK","clause-ran"]`).
 
-**The founding incident was row 2, not row 1.** The application runs camel-jta, where row 1 rolls
-back — so the original bug could only ever have been the boundary-crossing case, and an independent reviewer
-confirmed exactly that. Note the consequence for the sandbox: `TransactionProbe`, the first probe
+**The founding incident was row 2, not row 1.** That application runs camel-jta, where row 1 rolls
+back — so the original bug could only ever have been the boundary-crossing case, and an independent
+investigation confirmed exactly that. Note the consequence for the sandbox: `TransactionProbe`, the first probe
 written here, reproduces row 1 on **Spring**. It demonstrates the same symptom by a different
 route, and is not a reproduction of the incident. That is fine for illustrating the mechanism, but
-do not cite it as the application's bug.
+do not cite it as a reproduction of the original bug.
 
 Row 2 is the same on both and has nothing to do with transactions: the callee's own error handler
 claims and clears the failure before control returns. **This is the row a refactor creates** —
 factoring a stage into its own untransacted route moves its failures into a different error
-handler. Confirmed against the application by an independent reviewer, where the S3 upload sits in a separate
+handler. Confirmed against a real deployment, where an object-store upload sat in a separate
 non-transacted route reached by `.choice()`.
 
 The mark works everywhere because it writes to the **exchange**, which survives all of these paths.
@@ -319,7 +323,7 @@ commits the work written before the failure: `handled(true)`, a circuit breaker'
 `doCatch` (`CircuitBreakerProbe`). Two of those are reached for to make a route *more* robust.
 
 Also measured: the bug is only *observable* when the failure is non-resource — a SQL error has
-already poisoned the transaction. Of the application's three test cases, two fail via CHECK constraints
+already poisoned the transaction. Of three real test cases, two failed via CHECK constraints
 and passed even unfixed.
 
 ## Out of scope by decision, not oversight
@@ -456,7 +460,7 @@ Known and repeatedly reported; treated as by design in the general case.
 - ~~`continued(true)` and rollback marks.~~ **Measured** (`ContinuedProbe`): it does erase a mark,
   but only when the mark and the failure come from the **same step** — a mark set earlier halts
   routing at the next step, so nothing throws and no clause fires.
-- Does the application's per-retry-a-fresh-transaction nesting change what a clause sees on the second
+- Does camel-jta's per-retry-a-fresh-transaction nesting change what a clause sees on the second
   attempt? Not reproducible here; needs a probe against `camel-jta`.
 - **Does a streaming body handed to `seda:` really close underneath the source route?** The source
   doc's streaming section rests on it, and it is reachable in-JVM: a `platform-http` consumer, a
@@ -493,10 +497,9 @@ Keep these unless there is a reason not to; they were argued over.
   the convention excludes exactly the routes where the commit-on-failure bug lives. The honest
   claim is that it shrinks the set you must think hard about down to the transaction boundaries,
   which you then reason about one at a time. Stated at the `A transacted stage cannot decline` flag.
-- **Before this repo goes public, CLAUDE.md needs a scrub.** The guide and the probes are already
-  product-neutral; this file is not — it names the founding incident, the application's test cases and
-  an independent reviewer. That material is useful working context and must not ship. Move it out or redact it
-  as part of making the repo public, not afterwards.
+- **This repo is public, so this file is written for a reader outside it.** Findings established
+  against a real deployment go in as the finding, stated generically — no application name, no
+  internal reporter, no customer detail. That was scrubbed once; keep it that way when adding notes.
 - **The guide is product-neutral.** It names no internal class, test, repo path or product. Findings
   established against a real application go in as the finding, stated generically — a base
   `RouteBuilder` that registers clauses in `configure()`, not the class that happens to do it here.

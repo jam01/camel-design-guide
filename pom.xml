@@ -101,7 +101,7 @@
             <artifactId>camel-test-junit5</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- The application uses camel-jta with Narayana, and two findings here are known NOT to
+        <!-- The application this came from uses camel-jta with Narayana, and two findings here are known NOT to
              transfer to it. Both hinge on camel-jta's own rollback condition, so an embedded
              Narayana transaction manager settles them without a container or an XA datasource. -->
         <dependency>
