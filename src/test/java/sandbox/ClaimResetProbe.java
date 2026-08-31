@@ -10,7 +10,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Whether an application can get mappability back after something claimed the exchange.
+ * Whether an application can get mappability back after an error handler has claimed the exchange.
  * <p>
  * Camel already does this internally for one construct — {@code prepareExchangeForContinue} calls
  * {@code setFailureHandled(false)}, which is the fix from CAMEL-4057 living on. The question is

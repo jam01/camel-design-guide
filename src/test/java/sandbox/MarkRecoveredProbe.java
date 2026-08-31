@@ -11,7 +11,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Whether {@link MarkRecovered} actually buys back what a claim took, when used where
+ * Whether {@link MarkRecovered} actually buys back what an error handler's claim took, when used
+ * where
  * it is meant to be used: inside a {@code doCatch}, recovering from a transacted callee that failed
  * and rolled back properly.
  */

@@ -7,7 +7,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 /**
  * An independent check of the one variable that decides whether a throw from inside a
- * {@code doCatch} can be mapped by anybody: whether the exchange was already claimed.
+ * {@code doCatch} can be mapped by anybody: whether an error handler had already claimed the
+ * exchange.
  * <p>
  * Written separately from {@code CatchRethrowProbe} because it contradicts a statement that had
  * already been published, and a claim that overturns a published one should have its own witness.

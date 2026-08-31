@@ -10,7 +10,8 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * The difference between declining ownership and simply never having claimed it.
+ * The difference between declining ownership and an error handler having claimed the failure
+ * without saying anything about it.
  * <p>
  * Every route has an error handler whether or not anyone asked for one — with no declaration at
  * all it is a {@code DefaultErrorHandler} holding an empty list of exception policies. That is not

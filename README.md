@@ -143,7 +143,7 @@ One pass over a route before it merges. Every line is a link to the passage that
 - [ ] **If a caller must recover, does the callee leave the exception intact?**
   `handled(true)` in the callee makes recovery impossible, not merely awkward — there is
   nothing left to catch. [→](guide.md#4-does-a-caller-need-to-recover-from-it)
-- [ ] **Has anything already claimed this exchange?** One claim disables clause mapping for
+- [ ] **Has an error handler already claimed this exchange?** One claim disables clause mapping for
   the rest of its life, which in a request/reply app is the rest of the request.
   [→](guide.md#5-what-can-still-be-translated-after-the-first-failure)
 

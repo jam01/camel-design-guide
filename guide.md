@@ -36,11 +36,46 @@ Camel's internal names for the three things it stamps on an exchange are unmemor
 this document uses plain ones throughout. If you arrived here from a stack trace or a
 debugger, this is the table you want:
 
-| This document | Camel calls it | What it means |
-|---|---|---|
-| **Claimed** | `failureHandled` | Some handler has taken responsibility for this failure. No `onException` anywhere will see it again. |
-| **Handled** | `errorHandlerHandled` | Set by `handled(true)`. The failure became the outcome, so the exchange is a success from here on — and routing stops in every enclosing route. |
-| **Rollback mark** | `rollbackOnly` | Abort the transaction, with no exception to carry it. Also stops routing, immediately, wherever it is set. |
+| This document | Camel's field | Camel's own words | What it means |
+|---|---|---|---|
+| **Claimed by an error handler**<br><sub>short form: *claimed*</sub> | `failureHandled` | "Camel regards the Exchange as *failure handled*"; a processor used this way is a *failure handler* | Some handler has taken responsibility for this failure. No `onException` anywhere will see it again. |
+| **Handled** | `errorHandlerHandled` | "marked as handled"; "handled by the error handler" | Set by `handled(true)`. The failure became the outcome, so the exchange is a success from here on — and routing stops in every enclosing route. |
+| **Rollback mark** | `rollbackOnly` | "marked for rollback only" | Abort the transaction, with no exception to carry it. Also stops routing, immediately, wherever it is set. |
+
+> [!WARNING]
+> **Camel's two names point the opposite way from their behaviour**
+>
+> *"Handled by the error handler"* sounds like the ownership stamp. It is the verdict, set
+> by `handled(true)`. *"Failure handled"* sounds like the verdict — the failure has been
+> dealt with — but it is the ownership stamp, applied before any clause is consulted and
+> even when nothing handles anything. Reading either name literally gets you the other one,
+> which is why this document does not use them.
+>
+> The manual says *failure handled* exactly once, in
+> [Using a Processor as a Failure Handler](https://camel.apache.org/manual/exception-clause.html),
+> and presents it as *no redelivery, end of route* rather than as the permanent loss of
+> clause mapping that it also is.
+
+> [!NOTE]
+> **Looking for it in a debugger**
+>
+> The claim will **not** appear in `exchange.getProperties()`. Internal properties live in
+> an `EnumMap<ExchangePropertyKey, Object>` separate from the string-keyed map that
+> `getProperties()` returns, so a property dump — the first thing most people reach for —
+> shows no sign of it.
+> [source](https://github.com/apache/camel/blob/camel-4.18.0/core/camel-support/src/main/java/org/apache/camel/support/AbstractExchange.java)
+> `getProperty("CamelFailureHandled")` does resolve it, because the string is mapped back to
+> the enum key. The `Exchange.FAILURE_HANDLED` constant itself is deprecated as of 4.0.0.
+> The verdict is not a property at all — it lives only on `ExchangeExtension`.
+
+> [!IMPORTANT]
+> **Say it in full outside this document**
+>
+> *Claimed* is only meaningful next to this table. In a code comment, a commit message, a
+> pull request or a test's javadoc, write **claimed by an error handler** the first time —
+> those four extra words are the whole difference between a term and a private one, and
+> they answer the question a cold reader actually has, which is *claimed by what*. Bare
+> *claimed* is fine on repeat use, and fine throughout this document.
 
 The two that trip people up are **claimed** and **handled**, because they gate different
 machinery: claimed suppresses *mapping*, handled suppresses *routing*. Part three's
@@ -197,7 +232,8 @@ Then the callee must not mark the failure *handled*. Both `noErrorHandler()` and
 `doTry`/`doCatch` walks its own clause list without consulting the checks that decide
 whether routing continues, so it still reaches the catch on a failed exchange.
 [source](https://github.com/apache/camel/blob/camel-4.18.0/core/camel-core-processor/src/main/java/org/apache/camel/processor/TryProcessor.java)
-It reaches it on a *claimed* one too, which is why it is the only recovery left when the
+It reaches it on one an error handler has already *claimed*, too, which is why it is the
+only recovery left when the
 callee is transacted and cannot decline.
 
 You can also hand the failure onward from inside the catch, but only upward and only
@@ -333,8 +369,10 @@ a reset has to add:
 ```java
 class MarkRecovered implements Processor {
     public void process(Exchange ex) {
-        ex.getExchangeExtension().setFailureHandled(false);      // the claim
-        ex.getExchangeExtension().setErrorHandlerHandled(null);  // and the verdict
+        // the claim: set by any error handler that saw the failure
+        ex.getExchangeExtension().setFailureHandled(false);
+        // the verdict: what handled(true) sets
+        ex.getExchangeExtension().setErrorHandlerHandled(null);
     }
 }
 
@@ -1062,7 +1100,8 @@ below is those three plus the exception itself.
 
 ## The first clause to fire is the only clause
 
-An exchange is stamped *claimed* whether the clause handled the failure or not — the stamp
+An exchange is stamped *claimed by an error handler* whether the clause handled the failure
+or not — the stamp
 goes on before the handled/not-handled branch is even evaluated. Camel then treats a
 claimed exchange as finished, so no `onException` further up will process it.
 [source](https://github.com/apache/camel/blob/camel-4.18.0/core/camel-support/src/main/java/org/apache/camel/support/ExchangeHelper.java)
@@ -1772,7 +1811,8 @@ is short, and it is the difference between the failures here being diagnosable a
 *Practice, not measured.*
 
 - **Log the three stamps at the boundary you care about**, in this document's vocabulary. A
-  claimed-but-unhandled exchange arriving at an edge is the signature of the 500-where-you-meant-409
+  exchange claimed by an error handler but never handled, arriving at an edge, is the
+  signature of the 500-where-you-meant-409
   failure, and it is invisible in an ordinary log line. `ProbeSupport.stamps()` in this repo is
   eleven lines and is the same thing you want in a `Processor` at your edge.
 - **Propagate the MDC across every hop.** A thread change loses it unless Camel's MDC support is
@@ -1790,11 +1830,11 @@ is short, and it is the difference between the failures here being diagnosable a
 
 ## The plain names, and what they are actually called
 
-| This document | Camel |
-|---|---|
-| Claimed | `failureHandled` |
-| Handled | `errorHandlerHandled` |
-| Rollback mark | `rollbackOnly` |
+| This document | Camel's field | Camel's own words |
+|---|---|---|
+| Claimed | `failureHandled` | "failure handled" |
+| Handled | `errorHandlerHandled` | "marked as handled" |
+| Rollback mark | `rollbackOnly` | "marked for rollback only" |
 
 ## Where to look in the source
 
