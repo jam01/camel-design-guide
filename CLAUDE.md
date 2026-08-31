@@ -11,12 +11,23 @@ Produce a **design guide for Camel applications, aimed at both humans and agents
 Camel's manual — a guide to the decisions you actually face when laying out routes: what a stage
 should own, where a boundary belongs, what each construct commits you to.
 
-The guide lives as an artifact, not in this repo — *Where to Cut a Camel Application*:
+**The guide lives in this repo**, as markdown, and is the source of truth:
 
-**https://claude.ai/code/artifact/60ab4b26-fd17-4659-b11c-8b2eb9f12ec5**
+- `guide.md` — the document.
+- `README.md` — the navigator, the five per-property tables and the review card. The README is
+  *not* the guide; the card exists in one place only, here, because a drifted card is worse than
+  no card.
+- `METHOD.md` — versions, how to run the probes, what CI protects, known gaps.
+- `tools/check-links.py` — every `[probe](…)` must resolve to a file containing the test method it
+  names, and every in-document anchor to a real heading. Run it after any edit; CI runs it too.
 
-To update it, pass that URL as `url` when publishing. Publishing without it forks a new artifact and
-loses the thread. Read it first — it is the current state of the work.
+Probe links are `[probe](src/test/java/sandbox/XProbe.java "theTestMethodName")`. Link the file and
+name the method — never `#L42`, which rots silently on any edit above it.
+
+An earlier HTML artifact at
+`https://claude.ai/code/artifact/60ab4b26-fd17-4659-b11c-8b2eb9f12ec5` is the pre-port version and
+is **frozen** — it is still shared with people, so leave it live, but do not treat it as current and
+do not sync edits into it. Decide its fate when this repo goes public.
 
 **The guide is organised around the cut**, not around topics. This was chosen deliberately so that
 new topics cost a *column*, not a *part*:
@@ -482,6 +493,10 @@ Keep these unless there is a reason not to; they were argued over.
   the convention excludes exactly the routes where the commit-on-failure bug lives. The honest
   claim is that it shrinks the set you must think hard about down to the transaction boundaries,
   which you then reason about one at a time. Stated at the `A transacted stage cannot decline` flag.
+- **Before this repo goes public, CLAUDE.md needs a scrub.** The guide and the probes are already
+  product-neutral; this file is not — it names the founding incident, the application's test cases and
+  an independent reviewer. That material is useful working context and must not ship. Move it out or redact it
+  as part of making the repo public, not afterwards.
 - **The guide is product-neutral.** It names no internal class, test, repo path or product. Findings
   established against a real application go in as the finding, stated generically — a base
   `RouteBuilder` that registers clauses in `configure()`, not the class that happens to do it here.

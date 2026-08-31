@@ -1,0 +1,34 @@
+name: verify
+
+# Two jobs, and the second is the one that matters over time. The Camel version is
+# pinned, so running the probes guards against a probe being edited out from under a
+# claim rather than against Camel changing. The link check is what stops the evidence
+# layer rotting invisibly.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  probes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: temurin
+          cache: maven
+      - run: mvn --batch-mode clean test
+
+  links:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      # Every [probe](…) must resolve to a file containing the test method it names,
+      # and every in-document anchor to a real heading.
+      - run: python3 tools/check-links.py
